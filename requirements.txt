@@ -1,0 +1,13 @@
+google-auth
+google-auth-oauthlib
+numpy
+numpy-financial
+pandas
+plotly
+psycopg2-binary
+python-dateutil
+streamlit
+streamlit-oauth
+yfinance
+extra-streamlit-components
+google-cloud-secret-manager
