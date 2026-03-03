@@ -75,9 +75,15 @@ def clean_html_to_text(html_str):
 
 def send_email(destinatario, subject, body):
     """
-    Invia una email via Gmail API in formato HTML con supporto Emoji.
-    Implementa correttamente lo standard Multipart per evitare conversioni in testo piatto su Cloud Run.
+    Invia una email via Gmail API o simula l'invio in modalità DEMO.
     """
+    # CONTROLLO MODALITÀ DEMO
+    if os.getenv("DEMO_MODE", "false").lower() == "true":
+        print(f"--- SIMULAZIONE INVIO EMAIL ---")
+        print(f"A: {destinatario}")
+        print(f"Oggetto: {subject}")
+        print(f"Corpo (estratto): {clean_html_to_text(body)[:50]}...")
+        return True, "Email simulata con successo (Modalità Demo)."
     try:
         creds = _build_credentials()
     except Exception as exc:
