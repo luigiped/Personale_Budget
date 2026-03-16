@@ -1041,6 +1041,20 @@ with st.sidebar.expander("Impostazioni rapide", expanded=False):
             step=0.01,
             format="%.2f",
         )
+
+        fondo_snapshot_set = st.date_input(
+            "Data ultimo estratto Fondo",
+            value=pd.to_datetime(s_txt("fondo_data_snapshot", str(date.today()))).date(),
+            help="Data dell'ultimo estratto conto ufficiale del fondo. Le quote e il capitale base si riferiscono a questa data.",
+        )
+        fondo_tfr_set = st.number_input(
+            "TFR versato dopo estratto (€)",
+            min_value=0.0,
+            value=s_num("fondo_tfr_versato_anno", 0.0),
+            step=50.0,
+            help="TFR versato dal datore di lavoro DOPO la data dell'ultimo estratto. Aggiornalo manualmente ogni mese.",
+        )
+
         aliq_irpef_set = st.number_input(
             "Aliquota IRPEF (0-1)",
             min_value=0.0,
@@ -1083,9 +1097,11 @@ with st.sidebar.expander("Impostazioni rapide", expanded=False):
             "aliquota_irpef": float(aliq_irpef_set),
             "pac_rendimento_stimato": float(pac_rend_set),
             "fondo_rendimento_stimato": float(fondo_rend_set),
+            "fondo_tfr_versato_anno": float(fondo_tfr_set),
         }
         text_payload = {
             "pac_ticker": str(pac_ticker_set).strip(),
+            "fondo_data_snapshot": str(fondo_snapshot_set),
         }
         ok_save, err_msg = _save_settings_batch(numeric_payload, text_payload)
         if not ok_save:
@@ -1834,6 +1850,10 @@ with tab_assets:
     aliquota_irpef = aliquota_irpef_corrente
 
     if valore_quota > 0 and q_fondo > 0:
+        _fondo_snapshot_raw = s_txt("fondo_data_snapshot", str(date.today()))
+        _fondo_snapshot = pd.to_datetime(_fondo_snapshot_raw, errors="coerce").date()
+        _fondo_tfr = s_num("fondo_tfr_versato_anno", 0.0)
+
         res_fondo = log.analisi_fondo_pensione(
             valore_quota,
             q_fondo,
@@ -1841,9 +1861,11 @@ with tab_assets:
             vers_fondo,
             rendimento_fondo,
             df_mov,
-            anno_sel, 
+            anno_sel,
             aliquota_irpef=aliquota_irpef,
             anni=30,
+            data_snapshot=_fondo_snapshot,
+            tfr_versato_anno=_fondo_tfr,
         )
         valore_fondo_attuale = res_fondo["Sintesi"]["Valore Attuale"]
         capitale_fondo_attuale = res_fondo["Sintesi"]["Capitale Investito"]

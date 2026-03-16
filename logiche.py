@@ -999,9 +999,10 @@ def analisi_pac(
     }
     
 #logica proiezione andamento fondo pensione
-def analisi_fondo_pensione(valore_quota, quote_base, capitale_base, 
-                            versamento_mensile, rendimento_annuo_stimato, 
-                            df_transazioni, anno_corrente, aliquota_irpef=0.33, anni=30):
+def analisi_fondo_pensione(valore_quota, quote_base, capitale_base,
+                            versamento_mensile, rendimento_annuo_stimato,
+                            df_transazioni, anno_corrente, aliquota_irpef=0.33, anni=30,
+                            data_snapshot=None, tfr_versato_anno=0.0):
     """
     Calcola valore attuale dai dati reali e proietta il futuro.
     """
@@ -1036,28 +1037,47 @@ def analisi_fondo_pensione(valore_quota, quote_base, capitale_base,
             "Grafico_Proiezione": pd.DataFrame(),
         }
     
-    # Questo modo funziona indipendentemente da come hai importato datetime in alto
-    try:
-        oggi = datetime.datetime.now()
-    except AttributeError:
-        oggi = datetime.now() # Caso in cui l'import sia 'from datetime import datetime'
-
+    oggi = date.today()
     mese_attuale = oggi.month
     anno_reale_oggi = oggi.year
 
-    # 1. RECUPERO VERSAMENTI REALI DAL REGISTRO (Anno Corrente)
-    df_fondo_anno = df_transazioni[
-        (df_transazioni['Dettaglio'].str.contains("Fondo pensione", case=False, na=False)) & 
-        (df_transazioni['Data'].dt.year == anno_corrente)
-    ].copy()
-    
-    versato_reale_anno = df_fondo_anno['Importo'].abs().sum()
+    # Normalizza data_snapshot: se non passata, usa il 1 gennaio dell'anno corrente
+    # così il comportamento è identico a prima (retrocompatibile)
+    if data_snapshot is None:
+        data_snapshot = date(anno_corrente, 1, 1)
+    elif not isinstance(data_snapshot, date):
+        data_snapshot = pd.to_datetime(data_snapshot).date()
 
-    # 2. CALCOLO STATO ATTUALE DINAMICO (Reale ad oggi)
-    # Aggiunge alle quote base quelle comprate con i versamenti dell'anno
-    nuove_quote_reali = versato_reale_anno / valore_quota
-    quote_attuali_totali = quote_base + nuove_quote_reali
-    capitale_investito_totale = capitale_base + versato_reale_anno
+    tfr_versato_anno = float(tfr_versato_anno or 0.0)
+
+    # 1. RECUPERO VERSAMENTI ADERENTE DAL REGISTRO (solo DOPO lo snapshot)
+    # Così evitiamo doppio conteggio con capitale_base che include già tutto fino allo snapshot
+    df_fondo_delta = df_transazioni[
+        (df_transazioni['Dettaglio'].str.contains("Fondo pensione", case=False, na=False)) &
+        (df_transazioni['Data'].dt.date > data_snapshot)
+    ].copy().sort_values('Data')
+
+    # 2. CALCOLO QUOTE NUOVE per transazione (prezzo del giorno se disponibile)
+    nuove_quote_aderente = 0.0
+    versato_aderente_delta = 0.0
+    for _, riga in df_fondo_delta.iterrows():
+        importo = abs(float(riga['Importo']))
+        prezzo = float(riga['Valore_Quota']) if 'Valore_Quota' in riga.index and float(riga.get('Valore_Quota', 0)) > 0 else valore_quota
+        nuove_quote_aderente += importo / prezzo
+        versato_aderente_delta += importo
+
+    # 3. QUOTE E CAPITALE TFR (versato dopo lo snapshot, inserito manualmente)
+    nuove_quote_tfr = tfr_versato_anno / valore_quota if valore_quota > 0 else 0.0
+
+    # 4. STATO ATTUALE TOTALE
+    quote_attuali_totali   = quote_base + nuove_quote_aderente + nuove_quote_tfr
+    capitale_investito_totale = capitale_base + versato_aderente_delta + tfr_versato_anno
+
+    # Versato anno solare (per avanzamento fiscale) = tutte le transaz. fondo dell'anno corrente
+    versato_reale_anno = df_transazioni[
+        (df_transazioni['Dettaglio'].str.contains("Fondo pensione", case=False, na=False)) &
+        (df_transazioni['Data'].dt.year == anno_corrente)
+    ]['Importo'].abs().sum()
     
     valore_attuale_reale = valore_quota * quote_attuali_totali
     pl_assoluto = valore_attuale_reale - capitale_investito_totale
