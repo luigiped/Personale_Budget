@@ -1,10 +1,12 @@
 import argparse
+import logging
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 import pandas as pd
 import Database as db
 import logiche as log
 from gmail_sender import send_email
+logger = logging.getLogger(__name__)
 
 def _eur(value):
   """Formato canonico euro con separatore italiano.
@@ -198,12 +200,12 @@ def _send_weekly_notifications(recipients, df_calendar, today, dry_run=False):
           continue
 
       if dry_run:
-          print(f"[DRY-RUN] WEEKLY -> {recipient} ({len(df_week)} righe)")
+          logger.info("[DRY-RUN] WEEKLY -> %s (%d righe)", recipient, len(df_week))
           sent += 1
           continue
 
       ok, msg = send_email(recipient, subject, body)
-      print(f"[WEEKLY] {recipient}: {msg}")
+      logger.info("[WEEKLY] %s: %s", recipient, msg)
       if ok:
           db.registra_notifica_scadenza(key_week, recipient, end_week.isoformat())
           sent += 1
@@ -241,12 +243,12 @@ def _send_due_notifications(recipients, df_calendar, today, dry_run=False):
       df_pending = pd.DataFrame([item[1] for item in pending_rows])
       body = _format_due_body(df_pending, due_date)
       if dry_run:
-          print(f"[DRY-RUN] DUE1 -> {recipient} ({len(df_pending)} righe)")
+          logger.info("[DRY-RUN] DUE1 -> %s (%d righe)", recipient, len(df_pending))
           sent += 1
           continue
 
       ok, msg = send_email(recipient, subject, body)
-      print(f"[DUE1] {recipient}: {msg}")
+      logger.info("[DUE1] %s: %s", recipient, msg)
       if ok:
           for key, _ in pending_rows:
               db.registra_notifica_scadenza(key, recipient, due_date.isoformat())
@@ -256,50 +258,79 @@ def _send_due_notifications(recipients, df_calendar, today, dry_run=False):
 
 # --- IN gmail_sender.py (o il tuo file worker notifiche) ---
 
+def _invia_email_errore(titolo, exc, oggi):
+    """Invia una email di notifica errore via Gmail."""
+    ora = oggi.strftime("%d/%m/%Y") if hasattr(oggi, "strftime") else str(oggi)
+    try:
+        send_email(
+            "pedacelm@gmail.com",
+            f"❌ Personal Budget — {titolo}",
+            f"<div style='font-family: sans-serif; color: #333;'>"
+            f"Si è verificato un errore nel job automatico.<br><br>"
+            f"<b>Job:</b> Notifiche spese<br>"
+            f"<b>Data:</b> {ora}<br>"
+            f"<b>Errore:</b> {exc}<br><br>"
+            f"Controlla i log su Cloud Run per maggiori dettagli.<br><br>"
+            f"Il tuo assistente automatico 🤖"
+            f"</div>"
+        )
+        logger.info("Email di errore inviata.")
+    except Exception as mail_exc:
+        logger.error("Impossibile inviare email di errore: %s", mail_exc)
+
 def run(today=None, tz_name="Europe/Rome", dry_run=False):
   timezone = ZoneInfo(tz_name)
   today = today or datetime.now(timezone).date()
 
-  db.inizializza_db()
-  
-  # Recuperiamo la lista di tutti gli utenti registrati
+  try:
+      db.inizializza_db()
+  except Exception as exc:
+      logger.error("Errore inizializzazione DB: %s", exc)
+      _invia_email_errore("Errore inizializzazione DB nel job notifiche", exc, today)
+      return {"weekly": 0, "day_before": 0, "total": 0}
+
   recipients = db.lista_destinatari_notifiche()
   if not recipients:
-      print("Nessun destinatario notifiche disponibile.")
+      logger.warning("Nessun destinatario notifiche disponibile.")
       return {"weekly": 0, "day_before": 0, "total": 0}
 
   total_sent = {"weekly": 0, "day_before": 0}
 
-  # --- MODIFICA FONDAMENTALE: Loop per ogni utente ---
   for recipient in recipients:
-      print(f"Elaborazione notifiche per: {recipient}")
-      
-      # Carichiamo i dati SPECIFICI per questo utente
-      df_mov = _prepare_movimenti_df(db.carica_dati(recipient)) # <--- Modifica qui
-      df_ric = _prepare_ricorrenti_df(db.carica_spese_ricorrenti(recipient)) # <--- Modifica qui
-      df_fin = _prepare_finanziamenti_df(db.carica_finanziamenti(recipient)) # <--- Modifica qui
+      logger.info("Elaborazione notifiche per: %s", recipient)
+      try:
+          df_mov = _prepare_movimenti_df(db.carica_dati(recipient))
+          df_ric = _prepare_ricorrenti_df(db.carica_spese_ricorrenti(recipient))
+          df_fin = _prepare_finanziamenti_df(db.carica_finanziamenti(recipient))
 
-      month_pairs = {(today.year, today.month), ((today + timedelta(days=1)).year, (today + timedelta(days=1)).month)}
-      if today.weekday() == 0:
-          week_dates = [today + timedelta(days=i) for i in range(7)]
-          month_pairs.update((d.year, d.month) for d in week_dates)
+          month_pairs = {(today.year, today.month), ((today + timedelta(days=1)).year, (today + timedelta(days=1)).month)}
+          if today.weekday() == 0:
+              week_dates = [today + timedelta(days=i) for i in range(7)]
+              month_pairs.update((d.year, d.month) for d in week_dates)
 
-      df_calendar = _calendario_per_mesi(df_ric, df_fin, df_mov, month_pairs)
-      
-      if df_calendar.empty:
-          continue
+          df_calendar = _calendario_per_mesi(df_ric, df_fin, df_mov, month_pairs)
+          if df_calendar.empty:
+              continue
 
-      # Passiamo recipient singolo alle funzioni di notifica
-      weekly_sent = _send_weekly_notifications([recipient], df_calendar, today, dry_run=dry_run)
-      due_sent = _send_due_notifications([recipient], df_calendar, today, dry_run=dry_run)
-      
-      total_sent["weekly"] += weekly_sent
-      total_sent["day_before"] += due_sent
+          weekly_sent = _send_weekly_notifications([recipient], df_calendar, today, dry_run=dry_run)
+          due_sent = _send_due_notifications([recipient], df_calendar, today, dry_run=dry_run)
+          total_sent["weekly"] += weekly_sent
+          total_sent["day_before"] += due_sent
 
-  print(f"Notifiche inviate: weekly={total_sent['weekly']}, day_before={total_sent['day_before']}")
+      except Exception as exc:
+          logger.error("Errore nel job notifiche per %s: %s", recipient, exc)
+          _invia_email_errore(f"Errore nel job notifiche per {recipient}", exc, today)
+
+  logger.info("Notifiche inviate: weekly=%d, day_before=%d", total_sent["weekly"], total_sent["day_before"])
   return {"weekly": total_sent["weekly"], "day_before": total_sent["day_before"], "total": sum(total_sent.values())}
 
+
 def main():
+  logging.basicConfig(
+      level=logging.INFO,
+      format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+      datefmt="%Y-%m-%d %H:%M:%S",
+  )
   parser = argparse.ArgumentParser(description="Worker notifiche email Personal Budget")
   parser.add_argument("--today", type=str, default="", help="Data di riferimento YYYY-MM-DD (opzionale)")
   parser.add_argument("--timezone", type=str, default="Europe/Rome", help="Timezone IANA, es. Europe/Rome")
