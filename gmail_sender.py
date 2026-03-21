@@ -1,7 +1,10 @@
 import base64
 import json
+import logging
 import os
 import re
+
+logger = logging.getLogger(__name__)
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -56,9 +59,9 @@ def _build_credentials():
         if file_path is not None:
             try:
                 file_path.write_text(creds.to_json(), encoding="utf-8")
-            except Exception:
-                # In Cloud Run filesystem puo non essere persistente; ignoriamo.
-                pass
+            except OSError as exc:
+                # In Cloud Run il filesystem può non essere persistente; solo un warning.
+                logger.warning("Impossibile aggiornare il token su disco (%s): %s", file_path, exc)
     return creds
 
 
@@ -132,8 +135,11 @@ def send_email(destinatario, subject, body):
             detail = exc.read().decode("utf-8", errors="ignore")
         except Exception:
             detail = str(exc)
+        logger.error("Gmail API error %s: %s", exc.code, detail)
         return False, f"Gmail API error {exc.code}: {detail}"
     except URLError as exc:
+        logger.error("Errore rete Gmail API: %s", exc)
         return False, f"Errore rete Gmail API: {exc}"
     except Exception as exc:
+        logger.error("Invio email fallito: %s", exc)
         return False, f"Invio email fallito: {exc}"
