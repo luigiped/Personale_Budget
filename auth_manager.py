@@ -1,3 +1,5 @@
+# DOPO
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -5,6 +7,8 @@ import streamlit as st
 import streamlit.components.v1 as components
 import Database as db
 from config_runtime import auth_access_mode, get_secret
+
+logger = logging.getLogger(__name__)
 
 try:
     import extra_streamlit_components as stx
@@ -123,12 +127,12 @@ def _js_set_cookie(name, value, expires_at=None, secure=False, same_site="Lax"):
         attrs += f"max-age={max_age};"
     if secure:
         attrs += "secure;"
-    # note: value should already be safe (token_urlsafe ensures no quotes).
+    
     html = f"<script>document.cookie = '{name}={value};{attrs}';</script>"
     try:
         components.html(html, height=0)
     except Exception:
-        # if even JS injection fails, there's nothing else we can do
+       
         pass
 
 
@@ -164,6 +168,7 @@ def _set_cookie(name, value, expires_at=None):
             pass
 
     # se siamo qui, manager mancante o fallito: usiamo JS per scrivere il cookie
+    logger.debug("CookieManager non disponibile, uso fallback JS per il cookie '%s'.", name)
     _js_set_cookie(name, value, expires_at=expires_at, secure=is_https)
     return True
 
@@ -214,19 +219,13 @@ def _ensure_auth_tables(cursor):
 
 @st.cache_resource
 def _ensure_auth_schema_ready():
-    """Esegue il setup schema auth una sola volta per processo Streamlit."""
-    conn = None
-    cursor = None
     try:
-        conn = db.connetti_db()
-        cursor = conn.cursor()
-        _ensure_auth_tables(cursor)
-        conn.commit()
-    finally:
-        if cursor:
+        with db.connetti_db() as conn:
+            cursor = conn.cursor()
+            _ensure_auth_tables(cursor)
             cursor.close()
-        if conn:
-            conn.close()
+    except Exception as exc:
+        logger.error("_ensure_auth_schema_ready: %s", exc)
     return True
 
 
@@ -277,22 +276,21 @@ def get_session_user():
         st.session_state["auth_user_email"] = cached_user
         return cached_user
 
-    conn = None
-    cursor = None
     try:
         _ensure_auth_schema_ready()
-        conn = db.connetti_db()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT LOWER(TRIM(user_email)) AS user_email, expires_at
-            FROM active_sessions
-            WHERE token = %s
-            LIMIT 1
-            """,
-            (token,),
-        )
-        row = cursor.fetchone()
+        with db.connetti_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT LOWER(TRIM(user_email)) AS user_email, expires_at
+                FROM active_sessions
+                WHERE token = %s
+                LIMIT 1
+                """,
+                (token,),
+            )
+            row = cursor.fetchone()
+            cursor.close()
         if not row:
             _clear_local_auth_storage()
             return None
@@ -304,21 +302,13 @@ def get_session_user():
                 st.session_state["session_token"] = token
                 st.session_state["auth_user_email"] = email_norm
                 _store_cached_session_user(token, email_norm, expires_at)
-                # proviamo a ristabilire il cookie; se fallisce non lo segnaliamo
-                # all'utente perché l'errore è generalmente dovuto all'assenza del
-                # package `extra-streamlit-components` o a limitazioni del browser.
                 _set_cookie(SESSION_TOKEN_COOKIE, token, expires_at=expires_at)
             return email_norm
         _clear_local_auth_storage()
         return None
-    except Exception:
+    except Exception as exc:
+        logger.debug("get_session_user: errore verifica sessione: %s", exc)
         return None
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
 
 def create_new_session(email):
     """Crea una sessione di 7 giorni senza controllo preventivo su whitelist."""
