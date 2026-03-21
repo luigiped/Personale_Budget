@@ -155,36 +155,34 @@ def _applica_migrazioni(cursor):
 def inizializza_db():
     with connetti_db() as conn:
         cursor = conn.cursor()
-    
-    cursor.execute('''CREATE TABLE IF NOT EXISTS movimenti (
-        id SERIAL PRIMARY KEY, data TIMESTAMP, tipo TEXT, categoria TEXT, 
-        dettaglio TEXT, importo DOUBLE PRECISION, note TEXT, user_email TEXT)''')
-    
-    cursor.execute('''CREATE TABLE IF NOT EXISTS asset_settings (
-        chiave TEXT, user_email TEXT, valore_numerico DOUBLE PRECISION, 
-        valore_testo TEXT, PRIMARY KEY (chiave, user_email))''')
-    
-    cursor.execute('''CREATE TABLE IF NOT EXISTS finanziamenti (
-        nome TEXT, user_email TEXT, capitale_iniziale DOUBLE PRECISION, 
-        taeg DOUBLE PRECISION, durata_mesi INTEGER, data_inizio DATE, 
-        giorno_scadenza INTEGER, rate_pagate INTEGER, PRIMARY KEY (nome, user_email))''')
 
-    cursor.execute('''CREATE TABLE IF NOT EXISTS spese_ricorrenti (
-        id SERIAL PRIMARY KEY, descrizione TEXT, importo DOUBLE PRECISION, 
-        giorno_scadenza INTEGER, frequenza_mesi INTEGER, data_inizio DATE, 
-        data_fine DATE, user_email TEXT)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS movimenti (
+            id SERIAL PRIMARY KEY, data TIMESTAMP, tipo TEXT, categoria TEXT, 
+            dettaglio TEXT, importo DOUBLE PRECISION, note TEXT, user_email TEXT)''')
 
-    cursor.execute('''CREATE TABLE IF NOT EXISTS notifiche_scadenze (
-        id SERIAL PRIMARY KEY, chiave_evento TEXT UNIQUE, destinatario TEXT, 
-        data_scadenza DATE, inviato_il TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS asset_settings (
+            chiave TEXT, user_email TEXT, valore_numerico DOUBLE PRECISION, 
+            valore_testo TEXT, PRIMARY KEY (chiave, user_email))''')
 
-    cursor.execute('''CREATE TABLE IF NOT EXISTS utenti_notifiche (
-        email TEXT PRIMARY KEY, attivo BOOLEAN DEFAULT TRUE, 
-        ultimo_login TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    _applica_migrazioni(cursor)
-    conn.commit()
-    cursor.close()
-    conn.close()
+        cursor.execute('''CREATE TABLE IF NOT EXISTS finanziamenti (
+            nome TEXT, user_email TEXT, capitale_iniziale DOUBLE PRECISION, 
+            taeg DOUBLE PRECISION, durata_mesi INTEGER, data_inizio DATE, 
+            giorno_scadenza INTEGER, rate_pagate INTEGER, PRIMARY KEY (nome, user_email))''')
+
+        cursor.execute('''CREATE TABLE IF NOT EXISTS spese_ricorrenti (
+            id SERIAL PRIMARY KEY, descrizione TEXT, importo DOUBLE PRECISION, 
+            giorno_scadenza INTEGER, frequenza_mesi INTEGER, data_inizio DATE, 
+            data_fine DATE, user_email TEXT)''')
+
+        cursor.execute('''CREATE TABLE IF NOT EXISTS notifiche_scadenze (
+            id SERIAL PRIMARY KEY, chiave_evento TEXT UNIQUE, destinatario TEXT, 
+            data_scadenza DATE, inviato_il TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+        cursor.execute('''CREATE TABLE IF NOT EXISTS utenti_notifiche (
+            email TEXT PRIMARY KEY, attivo BOOLEAN DEFAULT TRUE, 
+            ultimo_login TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        _applica_migrazioni(cursor)
+        cursor.close()
 
 def pulisci_sessioni_scadute():
     """Elimina sessioni scadute e notifiche vecchie (> 90 giorni)."""
@@ -367,15 +365,13 @@ def registra_utente_notifiche(email, attivo=True):
     if not email_norm: return
     with connetti_db() as conn:
         cursor = conn.cursor()
-    query = """
-        INSERT INTO utenti_notifiche (email, attivo, ultimo_login)
-        VALUES (%s, %s, CURRENT_TIMESTAMP)
-        ON CONFLICT (email) DO UPDATE SET attivo = EXCLUDED.attivo, ultimo_login = CURRENT_TIMESTAMP
-    """
-    cursor.execute(query, (email_norm, bool(attivo)))
-    conn.commit()
-    cursor.close()
-    conn.close()
+        query = """
+            INSERT INTO utenti_notifiche (email, attivo, ultimo_login)
+            VALUES (%s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (email) DO UPDATE SET attivo = EXCLUDED.attivo, ultimo_login = CURRENT_TIMESTAMP
+        """
+        cursor.execute(query, (email_norm, bool(attivo)))
+        cursor.close()
 
 def notifica_scadenza_gia_inviata(chiave_evento):
     with connetti_db() as conn:
