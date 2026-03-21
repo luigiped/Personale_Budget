@@ -1,6 +1,6 @@
 # streamlit run interfaccia.py
 #per abilitare login e registrazione cambiare in secrets la chiave, da demo only a normal.
-
+import time
 import streamlit as st
 import pandas as pd
 import Database as db
@@ -283,7 +283,7 @@ def _require_login():
                     email_google = _fetch_google_userinfo_email(access_token)
                 if create_new_session(email_google):
                     try:
-                        st.experimental_set_query_params()
+                        st.query_params.clear()
                     except Exception:
                         pass
                     st.success("Accesso autorizzato.")
@@ -477,6 +477,11 @@ def _ensure_db_ready():
 
 
 _ensure_db_ready()
+try:
+    db.pulisci_sessioni_scadute()
+except Exception:
+    pass
+
 AUTH_USER_EMAIL = _require_login()
 user_email = AUTH_USER_EMAIL
 # Banner demo: visibile solo quando accede l'account demo.
@@ -551,23 +556,20 @@ if "Categoria" in df_mov:
     df_mov["Categoria"] = df_mov["Categoria"].astype(str).str.upper().str.strip()
 
 def _load_settings_df():
-    conn_local = db.connetti_db()
     try:
-        df = pd.read_sql(
-            "SELECT chiave, valore_numerico, valore_testo "
-            "FROM asset_settings WHERE user_email = %s",
-            conn_local,
-            params=(user_email,),
-        )
+        with db.connetti_db() as conn_local:
+            df = pd.read_sql(
+                "SELECT chiave, valore_numerico, valore_testo "
+                "FROM asset_settings WHERE user_email = %s",
+                conn_local,
+                params=(user_email,),
+            )
         if df.empty:
             return pd.DataFrame(columns=["valore_numerico", "valore_testo"]).set_index(pd.Index([]))
-        # Difesa ulteriore: in caso di dati storici duplicati manteniamo l'ultima riga per chiave.
         df = df.drop_duplicates(subset=["chiave"], keep="last")
         return df.set_index("chiave")
     except Exception:
         return pd.DataFrame(columns=["valore_numerico", "valore_testo"]).set_index(pd.Index([]))
-    finally:
-        conn_local.close()
 
 
 def _save_settings_batch(num_payload=None, txt_payload=None):
@@ -575,43 +577,24 @@ def _save_settings_batch(num_payload=None, txt_payload=None):
     txt_payload = txt_payload or {}
     if not user_email:
         return False, "Utente non autenticato."
-    conn_local = db.connetti_db()
-    cur = conn_local.cursor()
     try:
-        upsert_q = """
-            INSERT INTO asset_settings (chiave, user_email, valore_numerico, valore_testo)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (chiave, user_email) DO UPDATE SET
-                valore_numerico = EXCLUDED.valore_numerico,
-                valore_testo = EXCLUDED.valore_testo
-        """
-        for key, value in num_payload.items():
-            cur.execute(
-                upsert_q,
-                (
-                    str(key),
-                    user_email,
-                    float(value) if value is not None else None,
-                    None,
-                ),
-            )
-        for key, value in txt_payload.items():
-            cur.execute(
-                upsert_q,
-                (
-                    str(key),
-                    user_email,
-                    None,
-                    str(value) if value is not None else "",
-                ),
-            )
-        conn_local.commit()
+        with db.connetti_db() as conn_local:
+            cur = conn_local.cursor()
+            upsert_q = """
+                INSERT INTO asset_settings (chiave, user_email, valore_numerico, valore_testo)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (chiave, user_email) DO UPDATE SET
+                    valore_numerico = EXCLUDED.valore_numerico,
+                    valore_testo = EXCLUDED.valore_testo
+            """
+            for key, value in num_payload.items():
+                cur.execute(upsert_q, (str(key), user_email, float(value) if value is not None else None, None))
+            for key, value in txt_payload.items():
+                cur.execute(upsert_q, (str(key), user_email, None, str(value) if value is not None else ""))
+            cur.close()
         return True, ""
     except Exception as e:
-        conn_local.rollback()
         return False, str(e)
-    finally:
-        conn_local.close()
 
 
 def _verify_settings_batch(settings_df, num_payload=None, txt_payload=None):
@@ -901,6 +884,54 @@ def show_chart(fig, height=300, show_legend=True):
 def badge(text, variant=""):
     cls = f"badge {variant}".strip()
     return f"<span class='{cls}'>{text}</span>"
+def _fmt_num_it(value, decimals=2):
+    """Formatta un numero con separatore italiano."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return ""
+    s = f"{v:,.{decimals}f}"
+    return s.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _dialog_elimina_movimento(mov_id, label):
+    st.warning("Stai per eliminare il seguente movimento:")
+    st.markdown(f"**{label}**")
+    st.markdown("Questa operazione è **irreversibile**. Vuoi procedere?")
+    c1, c2 = st.columns(2)
+    if c1.button("🗑️ Sì, elimina", use_container_width=True, type="primary"):
+        db.elimina_movimento(mov_id, user_email)
+        db.carica_dati.clear()
+        st.session_state["_success_mov_ts"] = datetime.now().timestamp()
+        st.rerun()
+    if c2.button("Annulla", use_container_width=True):
+        st.rerun()
+
+def _dialog_elimina_ricorrente(spesa_id, descrizione):
+    st.warning("Stai per eliminare la seguente spesa ricorrente:")
+    st.markdown(f"**{descrizione}**")
+    st.markdown("Questa operazione è **irreversibile**. Vuoi procedere?")
+    c1, c2 = st.columns(2)
+    if c1.button("🗑️ Sì, elimina", use_container_width=True, type="primary"):
+        db.elimina_spesa_ricorrente(spesa_id, user_email)
+        db.carica_spese_ricorrenti.clear()
+        st.session_state["_success_ric_ts"] = datetime.now().timestamp()
+        st.rerun()
+    if c2.button("Annulla", use_container_width=True):
+        st.rerun()
+
+def _dialog_elimina_finanziamento(nome):
+    st.warning("Stai per eliminare il seguente finanziamento:")
+    st.markdown(f"**{nome}**")
+    st.markdown("Questa operazione è **irreversibile**. Vuoi procedere?")
+    c1, c2 = st.columns(2)
+    if c1.button("🗑️ Sì, elimina", use_container_width=True, type="primary"):
+        db.elimina_finanziamento(nome, user_email)
+        db.carica_finanziamenti.clear()
+        st.session_state["_success_fin_ts"] = datetime.now().timestamp()
+        st.rerun()
+    if c2.button("Annulla", use_container_width=True):
+        st.rerun()
 
 # --- SIDEBAR DI CONTROLLO ---
 st.sidebar.image("https://www.dropbox.com/scl/fi/hw4minjcf7zow3cbthozn/Screenshot-2026-02-12-alle-23.11.51.png?rlkey=lfxfvev6mtxeq6n5lwx7l6t8f&st=dckyjooz&raw=1", width=90)
@@ -2430,11 +2461,42 @@ with tab_admin:
     df_ric_view = db.carica_spese_ricorrenti(user_email)
     if not df_ric_view.empty:
         st.dataframe(style_df_currency(df_ric_view, ["importo"]), use_container_width=True, hide_index=True)
-        with st.form("form_delete_ricorrente"):
-            spesa_id = st.selectbox("Elimina spesa ricorrente (ID)", df_ric_view["id"].tolist())
-            if st.form_submit_button("ELIMINA"):
-                db.elimina_spesa_ricorrente(spesa_id, user_email=user_email)
-                st.success("Spesa ricorrente eliminata.")
+        if "_success_ric_ts" in st.session_state:
+            if datetime.now().timestamp() - st.session_state["_success_ric_ts"] < 3:
+                st.success("✅ Spesa ricorrente eliminata con successo.")
+                time.sleep(0.5)
+                st.rerun()
+            else:
+                del st.session_state["_success_ric_ts"]
+
+        col_sel_ric, col_btn_ric = st.columns([3, 1], vertical_alignment="bottom")
+        spesa_id = col_sel_ric.selectbox(
+            "Seleziona spesa ricorrente da eliminare",
+            df_ric_view["id"].tolist(),
+            format_func=lambda i: (
+                df_ric_view.loc[df_ric_view["id"] == i, "descrizione"].values[0]
+                if not df_ric_view.loc[df_ric_view["id"] == i, "descrizione"].empty
+                else str(i)
+            ),
+            key="sel_del_ric",
+        )
+        descrizione_sel = df_ric_view.loc[df_ric_view["id"] == spesa_id, "descrizione"].values[0] if spesa_id is not None else ""
+        if col_btn_ric.button("🗑️ Elimina", key="btn_del_ric", use_container_width=True):
+            st.session_state["pending_delete_ric"] = spesa_id
+
+        if st.session_state.get("pending_delete_ric") is not None:
+            sid = st.session_state["pending_delete_ric"]
+            desc = df_ric_view.loc[df_ric_view["id"] == sid, "descrizione"].values[0] if sid is not None else ""
+            st.warning(f"⚠️ Stai per eliminare **{desc}**. Operazione irreversibile.")
+            cc1, cc2 = st.columns(2)
+            if cc1.button("🗑️ Sì, elimina", key="confirm_del_ric", use_container_width=True, type="primary"):
+                db.elimina_spesa_ricorrente(sid, user_email=user_email)
+                db.carica_spese_ricorrenti.clear()
+                del st.session_state["pending_delete_ric"]
+                st.session_state["_success_ric_ts"] = datetime.now().timestamp()
+                st.rerun()
+            if cc2.button("Annulla", key="cancel_del_ric", use_container_width=True):
+                del st.session_state["pending_delete_ric"]
                 st.rerun()
     else:
         st.caption("Nessuna spesa ricorrente inserita.")
@@ -2493,28 +2555,47 @@ with tab_admin:
                 .fillna(0)
                 .astype(int)
             )
-        def _fmt_num_it(value, decimals=2):
-            try:
-                v = float(value)
-            except Exception:
-                return ""
-            s = f"{v:,.{decimals}f}"
-            return s.replace(",", "X").replace(".", ",").replace("X", ".")
 
         sty = df_fin_view.style.format({
             "Capitale": lambda x: _fmt_num_it(x, 2),
             "TAEG %": "{:.2f}%",
         })
         st.dataframe(sty, use_container_width=True, hide_index=True)
-        with st.form("form_delete_finanziamento"):
-            fin_nome = st.selectbox("Elimina finanziamento (Nome)", df_fin_db["nome"].tolist())
-            if st.form_submit_button("ELIMINA FINANZIAMENTO"):
-                db.elimina_finanziamento(fin_nome,user_email=user_email)
-                st.success("Finanziamento eliminato.")
+        if "_success_fin_ts" in st.session_state:
+            if datetime.now().timestamp() - st.session_state["_success_fin_ts"] < 3:
+                st.success("✅ Finanziamento eliminato con successo.")
+                time.sleep(0.5)
                 st.rerun()
+            else:
+                del st.session_state["_success_fin_ts"]
+
+        col_sel_fin, col_btn_fin = st.columns([3, 1], vertical_alignment="bottom")
+        fin_nome = col_sel_fin.selectbox(
+            "Seleziona finanziamento da eliminare",
+            df_fin_db["nome"].tolist(),
+            key="sel_del_fin",
+        )
+        if col_btn_fin.button("🗑️ Elimina", key="btn_del_fin", use_container_width=True):
+            st.session_state["pending_delete_fin"] = fin_nome
+
+        if st.session_state.get("pending_delete_fin") is not None:
+            fnome = st.session_state["pending_delete_fin"]
+            st.warning(f"⚠️ Stai per eliminare il finanziamento **{fnome}**. Operazione irreversibile.")
+            cc1, cc2 = st.columns(2)
+            if cc1.button("🗑️ Sì, elimina", key="confirm_del_fin", use_container_width=True, type="primary"):
+                db.elimina_finanziamento(fnome, user_email=user_email)
+                db.carica_finanziamenti.clear()
+                del st.session_state["pending_delete_fin"]
+                st.session_state["_success_fin_ts"] = datetime.now().timestamp()
+                st.rerun()
+            if cc2.button("Annulla", key="cancel_del_fin", use_container_width=True):
+                del st.session_state["pending_delete_fin"]
+                st.rerun()
+
 
     st.divider()
     st.subheader("Storico Movimenti")
+
     # Filtri registro
     c_f1, c_f2, c_f3 = st.columns([1, 1, 2])
     mese_reg = c_f1.selectbox("Mese registro", list(MONTH_NAMES.keys()), index=mese_sel - 1, format_func=lambda x: MONTH_NAMES[x])
@@ -2548,14 +2629,42 @@ with tab_admin:
     st.dataframe(style_df_currency(df_reg, ["Importo"]), use_container_width=True, height=280)
 
     if not df_reg.empty:
-        with st.form("form_delete_movimento"):
-            def _label_mov(i):
-                r = df_reg[df_reg["Id"] == i].iloc[0]
-                data_txt = r["Data"].strftime("%d/%m/%Y %H:%M") if pd.notna(r["Data"]) else ""
-                return f"{i} | {data_txt} | {r['Tipo']} | {r['Dettaglio']} | {eur2(r['Importo'])}"
+        def _label_mov(i):
+            rows = df_reg[df_reg["Id"] == i]
+            if rows.empty:
+                return str(i)
+            r = rows.iloc[0]
+            data_txt = r["Data"].strftime("%d/%m/%Y %H:%M") if pd.notna(r["Data"]) else ""
+            return f"{i} | {data_txt} | {r['Tipo']} | {r['Dettaglio']} | {eur2(r['Importo'])}"
 
-            mov_id = st.selectbox("Elimina movimento (ID)", df_reg["Id"].tolist(), format_func=_label_mov)
-            if st.form_submit_button("ELIMINA MOVIMENTO"):
-                db.elimina_movimento(mov_id,user_email)
-                st.success("Movimento eliminato.")
+        if "_success_mov_ts" in st.session_state:
+            if datetime.now().timestamp() - st.session_state["_success_mov_ts"] < 3:
+                st.success("✅ Movimento eliminato con successo.")
+                time.sleep(0.5)
+                st.rerun()
+            else:
+                del st.session_state["_success_mov_ts"]
+
+        col_sel_mov, col_btn_mov = st.columns([4, 1], vertical_alignment="bottom")
+        mov_id = col_sel_mov.selectbox(
+            "Seleziona movimento da eliminare",
+            df_reg["Id"].tolist(),
+            format_func=_label_mov,
+            key="sel_del_mov",
+        )
+        if col_btn_mov.button("🗑️ Elimina", key="btn_del_mov", use_container_width=True):
+            st.session_state["pending_delete_mov"] = mov_id
+
+        if st.session_state.get("pending_delete_mov") is not None:
+            mid = st.session_state["pending_delete_mov"]
+            st.warning(f"⚠️ Stai per eliminare il movimento **{_label_mov(mid)}**. Operazione irreversibile.")
+            cc1, cc2 = st.columns(2)
+            if cc1.button("🗑️ Sì, elimina", key="confirm_del_mov", use_container_width=True, type="primary"):
+                db.elimina_movimento(mid, user_email)
+                db.carica_dati.clear()
+                del st.session_state["pending_delete_mov"]
+                st.session_state["_success_mov_ts"] = datetime.now().timestamp()
+                st.rerun()
+            if cc2.button("Annulla", key="cancel_del_mov", use_container_width=True):
+                del st.session_state["pending_delete_mov"]
                 st.rerun()
