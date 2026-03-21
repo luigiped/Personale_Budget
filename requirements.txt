@@ -11,3 +11,4 @@ streamlit-oauth
 yfinance
 extra-streamlit-components
 google-cloud-secret-manager
+google-api-python-client
