@@ -1,3 +1,4 @@
+import logging
 import psycopg2
 import pandas as pd
 import streamlit as st
@@ -6,6 +7,40 @@ from datetime import datetime
 from urllib.parse import urlsplit
 import os
 import re
+
+logger = logging.getLogger(__name__)
+class _DBConn:
+    """Wrapper che aggiunge il supporto al context manager su una connessione psycopg2."""
+    def __init__(self, raw_conn):
+        self._conn = raw_conn
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def cursor(self, *args, **kwargs):
+        return self._conn.cursor(*args, **kwargs)
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if exc_type is None:
+                self._conn.commit()
+            else:
+                self._conn.rollback()
+        finally:
+            self._conn.close()
+        return False
 
 # --- GESTIONE CONNESSIONE ---
 def _sanitize_db_url(db_url):
@@ -54,7 +89,7 @@ def connetti_db():
     for uri in candidates:
         host = _extract_host(uri)
         try:
-            return psycopg2.connect(uri)
+            return _DBConn(psycopg2.connect(uri))
         except Exception as e:
             msg = str(e).strip().splitlines()[0]
             errors.append(f"{host}: {msg}")
@@ -81,7 +116,7 @@ def _applica_migrazioni(cursor):
         cursor.execute("ALTER TABLE finanziamenti DROP CONSTRAINT IF EXISTS finanziamenti_pkey CASCADE")
         cursor.execute("ALTER TABLE finanziamenti ADD PRIMARY KEY (nome, user_email)")
     except Exception as e:
-        print("Migrazione PK ignorata (già applicata o dati sporchi).")
+        logger.warning("Migrazione PK ignorata (già applicata o dati sporchi): %s", e)
 
     cursor.execute("ALTER TABLE movimenti ADD COLUMN IF NOT EXISTS data TIMESTAMP")
     cursor.execute("ALTER TABLE movimenti ADD COLUMN IF NOT EXISTS tipo TEXT")
@@ -118,8 +153,8 @@ def _applica_migrazioni(cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_spese_ricorrenti_user_email_descrizione ON spese_ricorrenti (user_email, descrizione)")
 
 def inizializza_db():
-    conn = connetti_db()
-    cursor = conn.cursor()
+    with connetti_db() as conn:
+        cursor = conn.cursor()
     
     cursor.execute('''CREATE TABLE IF NOT EXISTS movimenti (
         id SERIAL PRIMARY KEY, data TIMESTAMP, tipo TEXT, categoria TEXT, 
@@ -151,6 +186,27 @@ def inizializza_db():
     cursor.close()
     conn.close()
 
+def pulisci_sessioni_scadute():
+    """Elimina sessioni scadute e notifiche vecchie (> 90 giorni)."""
+    try:
+        with connetti_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM active_sessions WHERE expires_at < NOW()")
+            sessioni = cursor.rowcount
+            cursor.execute(
+                "DELETE FROM notifiche_scadenze "
+                "WHERE inviato_il < NOW() - INTERVAL '90 days'"
+            )
+            notifiche = cursor.rowcount
+            cursor.close()
+        if sessioni > 0 or notifiche > 0:
+            logger.info(
+                "Pulizia DB: %d sessioni scadute, %d notifiche vecchie rimosse.",
+                sessioni, notifiche
+            )
+    except Exception as exc:
+        logger.warning("pulisci_sessioni_scadute: %s", exc)
+
 # --- FUNZIONI DI SCRITTURA ---
 
 def aggiungi_movimento(data, tipo, categoria, dettaglio, importo, note, user_email):
@@ -167,18 +223,15 @@ def aggiungi_movimento(data, tipo, categoria, dettaglio, importo, note, user_ema
     except Exception:
         data_db = now.strftime('%Y-%m-%d %H:%M:%S')
 
-    conn = connetti_db()
-    cursor = conn.cursor()
-    tipo_norm = str(tipo).upper().strip().replace("ENTRATE", "ENTRATA").replace("USCITE", "USCITA")
-    cat_norm = str(categoria).upper().strip()
-    
-    query = """INSERT INTO movimenti (data, tipo, categoria, dettaglio, importo, note, user_email) 
-               VALUES (%s, %s, %s, %s, %s, %s, %s)"""
-    cursor.execute(query, (data_db, tipo_norm, cat_norm, dettaglio, importo, note, user_email))
-    conn.commit()
-    cursor.close()
-    conn.close()
-    carica_dati.clear() 
+    with connetti_db() as conn:
+        cursor = conn.cursor()
+        tipo_norm = str(tipo).upper().strip().replace("ENTRATE", "ENTRATA").replace("USCITE", "USCITA")
+        cat_norm = str(categoria).upper().strip()
+        query = """INSERT INTO movimenti (data, tipo, categoria, dettaglio, importo, note, user_email) 
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)"""
+        cursor.execute(query, (data_db, tipo_norm, cat_norm, dettaglio, importo, note, user_email))
+        cursor.close()
+    carica_dati.clear()
     
 
 def imposta_parametro(chiave, valore_num=None, valore_txt=None, user_email="admin"):
@@ -186,152 +239,134 @@ def imposta_parametro(chiave, valore_num=None, valore_txt=None, user_email="admi
     chiave_norm = str(chiave).strip()
     if not chiave_norm:
         raise ValueError("Chiave parametro non valida.")
-    conn = connetti_db()
-    cursor = conn.cursor()
-    query = """
-        INSERT INTO asset_settings (chiave, valore_numerico, valore_testo, user_email) 
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (chiave, user_email) DO UPDATE SET 
-            valore_numerico = EXCLUDED.valore_numerico, 
-            valore_testo = EXCLUDED.valore_testo
-    """
-    cursor.execute(query, (chiave_norm, valore_num, valore_txt, user_email_norm))
-    conn.commit()
-    cursor.close()
-    conn.close()
+    with connetti_db() as conn:
+        cursor = conn.cursor()
+        query = """
+            INSERT INTO asset_settings (chiave, valore_numerico, valore_testo, user_email) 
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (chiave, user_email) DO UPDATE SET 
+                valore_numerico = EXCLUDED.valore_numerico, 
+                valore_testo = EXCLUDED.valore_testo
+        """
+        cursor.execute(query, (chiave_norm, valore_num, valore_txt, user_email_norm))
+        cursor.close()
 
 def aggiungi_finanziamento(nome, capitale, taeg, durata, data_inizio, scadenza, rate_pagate, user_email):
-    conn = connetti_db()
-    cursor = conn.cursor()
-    query = """
-        INSERT INTO finanziamenti (nome, capitale_iniziale, taeg, durata_mesi, data_inizio, giorno_scadenza, rate_pagate, user_email) 
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (nome, user_email) DO UPDATE SET 
-            capitale_iniziale = EXCLUDED.capitale_iniziale, taeg = EXCLUDED.taeg,
-            durata_mesi = EXCLUDED.durata_mesi, data_inizio = EXCLUDED.data_inizio,
-            giorno_scadenza = EXCLUDED.giorno_scadenza, rate_pagate = EXCLUDED.rate_pagate
-    """
-    cursor.execute(query, (nome, capitale, taeg, durata, data_inizio, scadenza, rate_pagate, user_email))
-    conn.commit()
-    cursor.close()
-    conn.close()
-    carica_finanziamenti.clear()
+     with connetti_db() as conn:
+        cursor = conn.cursor()
+        query = """
+            INSERT INTO finanziamenti (nome, capitale_iniziale, taeg, durata_mesi, data_inizio, giorno_scadenza, rate_pagate, user_email) 
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (nome, user_email) DO UPDATE SET 
+                capitale_iniziale = EXCLUDED.capitale_iniziale, taeg = EXCLUDED.taeg,
+                durata_mesi = EXCLUDED.durata_mesi, data_inizio = EXCLUDED.data_inizio,
+                giorno_scadenza = EXCLUDED.giorno_scadenza, rate_pagate = EXCLUDED.rate_pagate
+        """
+        cursor.execute(query, (nome, capitale, taeg, durata, data_inizio, scadenza, rate_pagate, user_email))
+        cursor.close()
+        carica_finanziamenti.clear()
 
 def aggiungi_spesa_ricorrente(descrizione, importo, giorno_scadenza, frequenza_mesi, data_inizio, data_fine, user_email):
-    conn = connetti_db()
-    cursor = conn.cursor()
-    query = """
-        INSERT INTO spese_ricorrenti (descrizione, importo, giorno_scadenza, frequenza_mesi, data_inizio, data_fine, user_email) 
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-    """
-    cursor.execute(query, (descrizione, importo, giorno_scadenza, frequenza_mesi, data_inizio, data_fine, user_email))
-    conn.commit()
-    cursor.close()
-    conn.close()
+    with connetti_db() as conn:
+        cursor = conn.cursor()
+        query = """
+            INSERT INTO spese_ricorrenti (descrizione, importo, giorno_scadenza, frequenza_mesi, data_inizio, data_fine, user_email) 
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """
+        cursor.execute(query, (descrizione, importo, giorno_scadenza, frequenza_mesi, data_inizio, data_fine, user_email))
+        cursor.close()
     carica_spese_ricorrenti.clear()
 
 # --- FUNZIONI DI ELIMINAZIONE ---
 
 def elimina_movimento(mov_id, user_email):
-    conn = connetti_db()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM movimenti WHERE id = %s AND user_email = %s", (mov_id, user_email))
-    conn.commit()
-    cursor.close()
-    conn.close()
+    with connetti_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM movimenti WHERE id = %s AND user_email = %s", (mov_id, user_email))
+        cursor.close()
     carica_dati.clear()
 
 def elimina_finanziamento(nome, user_email):
-    conn = connetti_db()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM finanziamenti WHERE nome = %s AND user_email = %s", (nome, user_email))
-    conn.commit()
-    cursor.close()
-    conn.close()
+    with connetti_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM finanziamenti WHERE nome = %s AND user_email = %s", (nome, user_email))
+        cursor.close()
     carica_finanziamenti.clear()
 
 def elimina_spesa_ricorrente(spesa_id, user_email):
-    conn = connetti_db()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM spese_ricorrenti WHERE id = %s AND user_email = %s", (spesa_id, user_email))
-    conn.commit()
-    cursor.close()
-    conn.close()
-    
+    with connetti_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM spese_ricorrenti WHERE id = %s AND user_email = %s", (spesa_id, user_email))
+        cursor.close()
+    carica_spese_ricorrenti.clear()
 
 # --- FUNZIONI DI LETTURA ---
 
 @st.cache_data(ttl=60)
 def carica_dati(user_email):
-    conn = connetti_db()
-    query = "SELECT * FROM movimenti WHERE user_email = %s ORDER BY data DESC, id DESC"
-    df = pd.read_sql_query(query, conn, params=(user_email,))
-    conn.close()
+    with connetti_db() as conn:
+        query = "SELECT * FROM movimenti WHERE user_email = %s ORDER BY data DESC, id DESC"
+        df = pd.read_sql_query(query, conn, params=(user_email,))
     return df
 
 @st.cache_data(ttl=60)
 def carica_spese_ricorrenti(user_email):
-    conn = connetti_db()
-    try:
-        query = "SELECT * FROM spese_ricorrenti WHERE user_email = %s ORDER BY descrizione ASC"
-        df = pd.read_sql_query(query, conn, params=(user_email,))
-    except Exception:
-        df = pd.DataFrame()
-    conn.close()
+    with connetti_db() as conn:
+        try:
+            query = "SELECT * FROM spese_ricorrenti WHERE user_email = %s ORDER BY descrizione ASC"
+            df = pd.read_sql_query(query, conn, params=(user_email,))
+        except Exception:
+            df = pd.DataFrame()
     return df
 
 @st.cache_data(ttl=60)
 def carica_finanziamenti(user_email):
-    conn = connetti_db()
-    query = "SELECT * FROM finanziamenti WHERE user_email = %s"
-    df = pd.read_sql_query(query, conn, params=(user_email,))
-    conn.close()
+    with connetti_db() as conn:
+        query = "SELECT * FROM finanziamenti WHERE user_email = %s"
+        df = pd.read_sql_query(query, conn, params=(user_email,))
     return df
 
 @st.cache_data(ttl=60)
 def recupera_investimento_pac_db(user_email):
-    conn = connetti_db()
-    cursor = conn.cursor()
-    query = """
-        SELECT SUM(importo) FROM movimenti 
-        WHERE (categoria = 'PAC' OR dettaglio = 'PAC' OR tipo = 'PAC') AND user_email = %s
-    """
-    cursor.execute(query, (user_email,))
-    risultato = cursor.fetchone()[0]
-    cursor.close()
-    conn.close()
+    with connetti_db() as conn:
+        cursor = conn.cursor()
+        query = """
+            SELECT SUM(importo) FROM movimenti 
+            WHERE (categoria = 'PAC' OR dettaglio = 'PAC' OR tipo = 'PAC') AND user_email = %s
+        """
+        cursor.execute(query, (user_email,))
+        risultato = cursor.fetchone()[0]
+        cursor.close()
     return risultato if risultato else 0.0
 
 def recupera_totale_per_categoria(categoria, user_email):
-    conn = connetti_db()
-    cursor = conn.cursor()
-    query = "SELECT SUM(importo) FROM movimenti WHERE UPPER(categoria) = %s AND user_email = %s"
-    cursor.execute(query, (categoria.upper(), user_email))
-    risultato = cursor.fetchone()[0]
-    cursor.close()
-    conn.close()
+    with connetti_db() as conn:
+        cursor = conn.cursor()
+        query = "SELECT SUM(importo) FROM movimenti WHERE UPPER(categoria) = %s AND user_email = %s"
+        cursor.execute(query, (categoria.upper(), user_email))
+        risultato = cursor.fetchone()[0]
+        cursor.close()
     return risultato if risultato else 0.0
 
 # --- ALTRE UTILITIES ---
 
 def registra_notifica_scadenza(chiave_evento, destinatario, data_scadenza=None):
-    conn = connetti_db()
-    cursor = conn.cursor()
-    query = """
-        INSERT INTO notifiche_scadenze (chiave_evento, destinatario, data_scadenza) 
-        VALUES (%s, %s, %s) ON CONFLICT (chiave_evento) DO NOTHING
-    """
-    cursor.execute(query, (chiave_evento, destinatario, data_scadenza))
-    conn.commit()
-    cursor.close()
-    conn.close()
+    with connetti_db() as conn:
+        cursor = conn.cursor()
+        query = """
+            INSERT INTO notifiche_scadenze (chiave_evento, destinatario, data_scadenza) 
+            VALUES (%s, %s, %s) ON CONFLICT (chiave_evento) DO NOTHING
+        """
+        cursor.execute(query, (chiave_evento, destinatario, data_scadenza))
+        conn.commit()
+        cursor.close()
 
 def registra_utente_notifiche(email, attivo=True):
     if not email: return
     email_norm = str(email).strip().lower()
     if not email_norm: return
-    conn = connetti_db()
-    cursor = conn.cursor()
+    with connetti_db() as conn:
+        cursor = conn.cursor()
     query = """
         INSERT INTO utenti_notifiche (email, attivo, ultimo_login)
         VALUES (%s, %s, CURRENT_TIMESTAMP)
@@ -343,60 +378,61 @@ def registra_utente_notifiche(email, attivo=True):
     conn.close()
 
 def notifica_scadenza_gia_inviata(chiave_evento):
-    conn = connetti_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM notifiche_scadenze WHERE chiave_evento = %s LIMIT 1", (chiave_evento,))
-    row = cursor.fetchone()
-    cursor.close()
-    conn.close()
+    with connetti_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM notifiche_scadenze WHERE chiave_evento = %s LIMIT 1", (chiave_evento,))
+        row = cursor.fetchone()
+        cursor.close()
     return row is not None
 
 def lista_destinatari_notifiche():
-    conn = connetti_db()
-    cursor = conn.cursor()
-    destinatari = set()
-    try:
-        cursor.execute("SELECT DISTINCT LOWER(TRIM(email)) AS email FROM utenti_notifiche WHERE attivo = TRUE AND email IS NOT NULL")
-        for (email,) in cursor.fetchall():
-            if email: destinatari.add(str(email).strip().lower())
-    except Exception: pass
-    cursor.close()
-    conn.close()
+    with connetti_db() as conn:
+        cursor = conn.cursor()
+        destinatari = set()
+        try:
+            cursor.execute("SELECT DISTINCT LOWER(TRIM(email)) AS email FROM utenti_notifiche WHERE attivo = TRUE AND email IS NOT NULL")
+            for (email,) in cursor.fetchall():
+                if email: destinatari.add(str(email).strip().lower())
+        except Exception: pass
+        cursor.close()
     return sorted(destinatari)
 
 def verifica_password(password_inserita):
-    password_reale = st.secrets.get('PASSWORD_APP', "admin123")
+    try:
+        password_reale = st.secrets.get("PASSWORD_APP")
+    except Exception:
+        password_reale = None
+    if not password_reale:
+        return False
     return password_inserita == password_reale
 
 # --- IMPORTAZIONE CSV ---
 
 def importa_csv_storici(lista_file_csv, user_email="admin"):
-    conn = connetti_db()
-    cursor = conn.cursor()
     totale = 0
-    for file in lista_file_csv:
-        file_name = getattr(file, "name", str(file))
-        try:
-            df = pd.read_csv(file, sep=None, engine='python', encoding='utf-8')
-            df.columns = df.columns.str.strip()
-            mappa = {'DATA':'data', 'TIPO':'tipo', 'CATEGORIA':'categoria', 'DETTAGLIO SPESA':'dettaglio', 'IMPORTO':'importo'}
-            df = df.rename(columns=mappa)
-            
-            if 'tipo' in df.columns: df['tipo'] = df['tipo'].astype(str).str.upper().str.strip().replace({'ENTRATE': 'ENTRATA', 'USCITE': 'USCITA'})
-            if 'categoria' in df.columns: df['categoria'] = df['categoria'].astype(str).str.upper().str.strip()
-            if df['importo'].dtype == 'O': df['importo'] = df['importo'].str.replace('€', '').str.replace('.', '').str.replace(',', '.').str.strip().astype(float)
-            df['data'] = pd.to_datetime(df['data'], dayfirst=True).dt.strftime('%Y-%m-%d %H:%M:%S')
-            
-            for _, row in df.iterrows():
-                cursor.execute(
-                    "INSERT INTO movimenti (data, tipo, categoria, dettaglio, importo, note, user_email) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                    (row['data'], row['tipo'], row['categoria'], row.get('dettaglio', ''), row['importo'], "", user_email)
-                )
-            conn.commit()
-            totale += len(df)
-        except Exception as e:
-            conn.rollback()
-            print(f"❌ Errore nel file {file_name}: {e}")
-    cursor.close()
-    conn.close()
+    with connetti_db() as conn:
+        cursor = conn.cursor()
+        for file in lista_file_csv:
+            file_name = getattr(file, "name", str(file))
+            try:
+                df = pd.read_csv(file, sep=None, engine='python', encoding='utf-8')
+                df.columns = df.columns.str.strip()
+                mappa = {'DATA':'data', 'TIPO':'tipo', 'CATEGORIA':'categoria', 'DETTAGLIO SPESA':'dettaglio', 'IMPORTO':'importo'}
+                df = df.rename(columns=mappa)
+                if 'tipo' in df.columns: df['tipo'] = df['tipo'].astype(str).str.upper().str.strip().replace({'ENTRATE': 'ENTRATA', 'USCITE': 'USCITA'})
+                if 'categoria' in df.columns: df['categoria'] = df['categoria'].astype(str).str.upper().str.strip()
+                if df['importo'].dtype == 'O': df['importo'] = df['importo'].str.replace('€', '').str.replace('.', '').str.replace(',', '.').str.strip().astype(float)
+                df['data'] = pd.to_datetime(df['data'], dayfirst=True).dt.strftime('%Y-%m-%d %H:%M:%S')
+                for _, row in df.iterrows():
+                    cursor.execute(
+                        "INSERT INTO movimenti (data, tipo, categoria, dettaglio, importo, note, user_email) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                        (row['data'], row['tipo'], row['categoria'], row.get('dettaglio', ''), row['importo'], "", user_email)
+                    )
+                conn.commit()
+                totale += len(df)
+                logger.info("Importato: %s (%d righe)", file_name, len(df))
+            except Exception as e:
+                conn.rollback()
+                logger.error("Errore nel file %s: %s", file_name, e)
+        cursor.close()
     return totale
