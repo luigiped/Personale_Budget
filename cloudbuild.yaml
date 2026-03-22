@@ -1,0 +1,26 @@
+steps:
+  # 1. Costruisce l'immagine Docker
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/personalbudget', '.']
+
+  # 2. Invia l'immagine al registro (Push)
+  - name: 'gcr.io/cloud-builders/docker'
+    # Deve essere lo stesso nome usato sopra
+    args: ['push', 'gcr.io/$PROJECT_ID/personalbudget']
+
+  # 3. Deploy su Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'personalbudget' 
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/personalbudget'
+      - '--region'
+      - 'europe-west1'
+      - '--platform'
+      - 'managed'
+options:
+ 
+  logging: CLOUD_LOGGING_ONLY
