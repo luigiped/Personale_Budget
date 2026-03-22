@@ -43,21 +43,21 @@ def _read_streamlit_secret(name):
 
 
 def _resolve_app_env():
-    # In Streamlit locale i secrets non sono in os.environ all'import.
     raw = _read_env("APP_ENV") or _read_streamlit_secret("APP_ENV")
     return _normalize(raw) or "production"
 
 
 def _is_demo_env(app_env):
     value = str(app_env or "").strip().lower()
-    # Supporta sia "demo" sia varianti come "demo_personal_budget".
     return value == "demo" or value.startswith("demo_")
-
 
 # rileva se siamo in modalità demo
 # in locale legge anche .streamlit/secrets.toml
 APP_ENV = _resolve_app_env()
-IS_DEMO = _is_demo_env(APP_ENV)
+# IS_DEMO deriva da AUTH_ACCESS_MODE — un solo switch per tutto
+_auth_mode_raw = _read_env("AUTH_ACCESS_MODE") or _read_streamlit_secret("AUTH_ACCESS_MODE") or "normal"
+IS_DEMO = str(_auth_mode_raw).strip().lower() != "normal"
+
 AUTH_MODE_ALLOWED = {"normal", "demo_only", "closed"}
 
 
