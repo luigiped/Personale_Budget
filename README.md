@@ -15,6 +15,7 @@ Una web app per la gestione delle finanze personali, costruita con **Python** e 
 - **Previsione saldo** – regressione lineare sui dati storici per stimare il saldo dei mesi futuri
 - **Composizione portafoglio** – ripartizione percentuale tra liquidità, PAC e fondo pensione
 - **Notifiche email automatiche** – riepilogo settimanale e promemoria scadenze il giorno prima
+- **Backup dati** – download on-demand in formato SQL dall'app; invio automatico via email notturno in produzione
 - **Autenticazione** – login con email/password e Google OAuth 2.0, con modalità demo e modalità chiusa
 
 ---
@@ -27,8 +28,9 @@ Una web app per la gestione delle finanze personali, costruita con **Python** e 
 ├── Database.py             # Layer dati: connessione PostgreSQL, CRUD, migrazioni
 ├── auth_manager.py         # Autenticazione: sessioni, login email, Google OAuth
 ├── config_runtime.py       # Configurazione: env var, Streamlit secrets, Secret Manager
-├── gmail_sender.py         # Invio email tramite Gmail API (OAuth2)
+├── gmail_sender.py         # Invio email tramite Gmail API (OAuth2) con supporto allegati
 ├── notification_worker.py  # Worker notifiche: riepilogo settimanale e reminder scadenze
+├── backup_db.py            # Worker backup: genera SQL per utente e invia via email
 └── requirements.txt        # Dipendenze Python
 ```
 
@@ -64,7 +66,7 @@ pip install -r requirements.txt
 Dipendenze principali:
 
 ```
-streamlit
+streamlit>=1.30
 pandas
 numpy
 numpy-financial
@@ -74,6 +76,7 @@ python-dateutil
 yfinance
 google-auth
 google-auth-oauthlib
+google-api-python-client
 streamlit-oauth
 extra-streamlit-components
 ```
@@ -100,8 +103,7 @@ L'app legge la configurazione da tre fonti, in ordine di priorità:
 | `GOOGLE_CLIENT_SECRET` | Client Secret Google OAuth |
 | `GMAIL_TOKEN_SISTEMA` | Token OAuth2 Gmail (JSON serializzato) |
 | `APP_BASE_URL` | URL pubblico dell'app (per il redirect OAuth) |
-| `APP_ENV` | `production` oppure `demo` per la modalità demo |
-| `AUTH_ACCESS_MODE` | `normal` / `demo_only` / `closed` |
+| `AUTH_ACCESS_MODE` | `normal` / `demo_only` / `closed` — controlla accessi E attiva/disattiva email automatiche |
 
 ### Esempio `.streamlit/secrets.toml`
 
@@ -110,8 +112,7 @@ DATABASE_URL = "postgresql://user:password@host:5432/dbname"
 GOOGLE_CLIENT_ID = "xxxx.apps.googleusercontent.com"
 GOOGLE_CLIENT_SECRET = "GOCSPX-..."
 GMAIL_TOKEN_SISTEMA = '{"token": "...", "refresh_token": "...", ...}'
-APP_ENV = "production"
-AUTH_ACCESS_MODE = "normal"
+AUTH_ACCESS_MODE = "normal"  # normal | demo_only | closed
 ```
 
 ---
@@ -133,6 +134,8 @@ Il worker `notification_worker.py` invia automaticamente:
 - **Ogni lunedì** – riepilogo delle scadenze della settimana
 - **Ogni giorno** – promemoria per i pagamenti in scadenza il giorno successivo
 
+Le notifiche sono **disattivate automaticamente** quando `AUTH_ACCESS_MODE` è `demo_only` o `closed`. Si attivano impostando `AUTH_ACCESS_MODE = normal`.
+
 Può essere eseguito manualmente o schedulato (es. cron job, Cloud Scheduler):
 
 ```bash
@@ -150,6 +153,33 @@ Il worker evita duplicati tramite un registro interno delle notifiche già invia
 
 ---
 
+## 💾 Backup dati (backup worker)
+
+Il worker `backup_db.py` genera un dump SQL dei dati di ogni utente e lo invia come allegato email direttamente all'utente.
+
+**Caratteristiche:**
+- Multi-tenant — ogni utente riceve solo i propri dati
+- Off-site — il backup è nella casella email dell'utente, indipendente da Supabase
+- Disattivato automaticamente quando `AUTH_ACCESS_MODE` è `demo_only` o `closed`
+
+**Download on-demand:** nel tab Registro dell'app è disponibile il pulsante "Scarica backup dati" che genera il file SQL al volo e lo scarica nel browser — funziona sempre, anche in modalità demo.
+
+**Tabelle incluse nel backup:**
+- `movimenti`, `asset_settings`, `finanziamenti`, `spese_ricorrenti`
+
+**Schedulazione su Cloud Run:**
+```bash
+gcloud scheduler jobs create http backup-budget-notturno \
+  --location europe-west1 \
+  --schedule "0 2 * * *" \
+  --uri "https://europe-west1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/YOUR_PROJECT/jobs/backup-budget:run" \
+  --message-body "{}" \
+  --oauth-service-account-email YOUR_PROJECT@appspot.gserviceaccount.com \
+  --time-zone "Europe/Rome"
+```
+
+---
+
 ## 🗄️ Database
 
 L'applicazione usa PostgreSQL con le seguenti tabelle principali:
@@ -160,8 +190,10 @@ L'applicazione usa PostgreSQL con le seguenti tabelle principali:
 | `spese_ricorrenti` | Spese periodiche (affitto, abbonamenti, ecc.) |
 | `finanziamenti` | Prestiti e mutui |
 | `asset_settings` | Impostazioni personali (PAC, fondo pensione, saldi) |
-| `utenti_registrati` | Account utenti |
+| `utenti_registrati` | Account utenti (email + password hash) |
+| `utenti_notifiche` | Utenti iscritti alle notifiche email automatiche |
 | `notifiche_scadenze` | Storico notifiche inviate (anti-duplicato) |
+| `active_sessions` | Sessioni attive (token + scadenza) |
 
 Le migrazioni vengono applicate automaticamente all'avvio tramite `db.inizializza_db()`.
 
@@ -171,11 +203,13 @@ Le migrazioni vengono applicate automaticamente all'avvio tramite `db.inizializz
 
 Sono supportate tre modalità, configurabili tramite `AUTH_ACCESS_MODE`:
 
-- `normal` – registrazione e login aperti a tutti
-- `demo_only` – accesso esclusivo all'account demo (credenziali da secrets)
-- `closed` – accessi disabilitati (modalità manutenzione)
+- `normal` – registrazione e login aperti a tutti; notifiche email e backup automatici attivi
+- `demo_only` – accesso esclusivo all'account demo; notifiche email e backup automatici disattivati
+- `closed` – accessi disabilitati (modalità manutenzione); notifiche email e backup automatici disattivati
 
 Il login è possibile con email/password oppure tramite **Google OAuth 2.0**. Le sessioni sono gestite tramite cookie sicuri (`pb_session_token`).
+
+> **Nota:** `AUTH_ACCESS_MODE` è l'unico switch da cambiare per passare dalla modalità demo alla produzione completa.
 
 ---
 
@@ -227,10 +261,13 @@ Gestisce il ciclo di vita delle sessioni utente, il login con email/password (ha
 Risolve i segreti dell'applicazione in modo uniforme tra ambienti diversi (locale, Streamlit Cloud, Cloud Run). Espone `get_secret(name)` come interfaccia unica.
 
 ### `gmail_sender.py`
-Invia email HTML tramite Gmail API con supporto emoji. Gestisce il refresh automatico del token OAuth2 e il formato `multipart/alternative` per compatibilità massima.
+Invia email HTML tramite Gmail API con supporto emoji. Gestisce il refresh automatico del token OAuth2 e il formato `multipart/alternative` per compatibilità massima. Espone anche `send_email_with_attachment()` per l'invio di file allegati (usato dal backup worker).
 
 ### `notification_worker.py`
-Worker standalone per l'invio di notifiche email personalizzate per utente. Carica i dati di ogni utente indipendentemente e verifica i duplicati prima di inviare.
+Worker standalone per l'invio di notifiche email personalizzate per utente. Carica i dati di ogni utente indipendentemente e verifica i duplicati prima di inviare. Disattivato automaticamente se `AUTH_ACCESS_MODE != normal`.
+
+### `backup_db.py`
+Worker standalone per il backup dati multi-tenant. Genera un dump SQL filtrato per `user_email` e lo invia come allegato email a ogni utente registrato. Disattivato automaticamente se `AUTH_ACCESS_MODE != normal`. Il download on-demand dall'interfaccia è sempre disponibile indipendentemente dalla modalità.
 
 ---
 
