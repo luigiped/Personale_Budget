@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 import pandas as pd
@@ -282,8 +283,14 @@ def run(today=None, tz_name="Europe/Rome", dry_run=False):
   timezone = ZoneInfo(tz_name)
   today = today or datetime.now(timezone).date()
 
+  auth_mode = os.getenv("AUTH_ACCESS_MODE", "normal").strip().lower()
+  if auth_mode != "normal":
+      logger.info("AUTH_ACCESS_MODE=%s — invio notifiche saltato.", auth_mode)
+      return {"weekly": 0, "day_before": 0, "total": 0}
+
   try:
       db.inizializza_db()
+      
   except Exception as exc:
       logger.error("Errore inizializzazione DB: %s", exc)
       _invia_email_errore("Errore inizializzazione DB nel job notifiche", exc, today)
