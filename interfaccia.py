@@ -2592,6 +2592,79 @@ with tab_admin:
                 del st.session_state["pending_delete_fin"]
                 st.rerun()
 
+    st.divider()
+    st.subheader("Backup dati")
+
+    @st.cache_data(ttl=0, show_spinner=False)
+    def _genera_sql_backup(email):
+        """Genera il dump SQL per l'utente corrente al volo."""
+        import psycopg2
+        from config_runtime import get_secret
+
+        db_url = get_secret("DATABASE_URL") or get_secret("DATABASE_URL_POOLER")
+        if not db_url:
+            return None
+
+        tabelle = ["movimenti", "asset_settings", "finanziamenti", "spese_ricorrenti"]
+        try:
+            conn = psycopg2.connect(db_url)
+            cursor = conn.cursor()
+            ora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            blocchi = [
+                f"-- Personal Budget — Backup dati",
+                f"-- Utente: {email}",
+                f"-- Data  : {ora}",
+                "SET client_encoding = 'UTF8';",
+            ]
+            for tabella in tabelle:
+                blocchi.append(f"\n-- Tabella: {tabella}")
+                try:
+                    cursor.execute(
+                        f"SELECT * FROM {tabella} WHERE user_email = %s",
+                        (email,)
+                    )
+                    righe = cursor.fetchall()
+                    colonne = [desc[0] for desc in cursor.description]
+                    for riga in righe:
+                        valori = []
+                        for v in riga:
+                            if v is None:
+                                valori.append("NULL")
+                            elif isinstance(v, bool):
+                                valori.append("TRUE" if v else "FALSE")
+                            elif isinstance(v, (int, float)):
+                                valori.append(str(v))
+                            else:
+                                valori.append(f"'{str(v).replace(chr(39), chr(39)*2)}'")
+                        blocchi.append(
+                            f"INSERT INTO {tabella} ({', '.join(colonne)}) "
+                            f"VALUES ({', '.join(valori)});"
+                        )
+                except Exception as exc:
+                    blocchi.append(f"-- ERRORE {tabella}: {exc}")
+            cursor.close()
+            conn.close()
+            return "\n".join(blocchi)
+        except Exception as exc:
+            return None
+
+    sql_backup = _genera_sql_backup(user_email)
+    if sql_backup:
+        data_oggi = datetime.now().strftime("%Y-%m-%d")
+        st.caption(
+            "Scarica una copia completa dei tuoi dati in formato SQL. "
+            "Conservala in un posto sicuro — è accessibile anche senza l'app."
+        )
+        st.download_button(
+            label="⬇️ Scarica backup dati",
+            data=sql_backup.encode("utf-8"),
+            file_name=f"personal_budget_backup_{data_oggi}.sql",
+            mime="text/plain",
+            use_container_width=False,
+        )
+    else:
+        st.caption("Impossibile generare il backup al momento.")
+
 
     st.divider()
     st.subheader("Storico Movimenti")
