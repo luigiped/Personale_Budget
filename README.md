@@ -79,7 +79,7 @@ google-auth-oauthlib
 google-api-python-client
 streamlit-oauth
 extra-streamlit-components
-```
+
 
 ---
 
