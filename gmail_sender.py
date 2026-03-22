@@ -3,8 +3,8 @@ import json
 import logging
 import os
 import re
-
-logger = logging.getLogger(__name__)
+from email import encoders
+from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -13,6 +13,8 @@ from urllib.request import Request, urlopen
 
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2.credentials import Credentials
+
+logger = logging.getLogger(__name__)
 
 GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 GMAIL_SEND_ENDPOINT = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
@@ -60,7 +62,6 @@ def _build_credentials():
             try:
                 file_path.write_text(creds.to_json(), encoding="utf-8")
             except OSError as exc:
-                # In Cloud Run il filesystem può non essere persistente; solo un warning.
                 logger.warning("Impossibile aggiornare il token su disco (%s): %s", file_path, exc)
     return creds
 
@@ -143,3 +144,74 @@ def send_email(destinatario, subject, body):
     except Exception as exc:
         logger.error("Invio email fallito: %s", exc)
         return False, f"Invio email fallito: {exc}"
+
+
+def send_email_with_attachment(destinatario, subject, body, filename, content, mimetype="text/plain"):
+    """
+    Invia una email con un file allegato via Gmail API.
+      - filename : nome del file allegato (es. 'backup_2026-03-22.sql')
+      - content  : contenuto del file come stringa o bytes
+      - mimetype : tipo MIME dell'allegato (default 'text/plain')
+    """
+    if os.getenv("DEMO_MODE", "false").lower() == "true":
+        print(f"--- SIMULAZIONE INVIO EMAIL CON ALLEGATO ---")
+        print(f"A: {destinatario} | Allegato: {filename}")
+        return True, "Email simulata con successo (Modalità Demo)."
+
+    try:
+        creds = _build_credentials()
+    except Exception as exc:
+        return False, f"Credenziali Gmail non valide: {exc}"
+
+    # Contenitore principale mixed (corpo + allegato)
+    msg = MIMEMultipart("mixed")
+    msg["To"] = str(destinatario or "").strip()
+    msg["Subject"] = str(subject or "").strip()
+
+    # Parte corpo: alternative (plain + html)
+    corpo = MIMEMultipart("alternative")
+    corpo.attach(MIMEText(clean_html_to_text(body), "plain", "utf-8"))
+    corpo.attach(MIMEText(body, "html", "utf-8"))
+    msg.attach(corpo)
+
+    # Parte allegato
+    if isinstance(content, str):
+        content = content.encode("utf-8")
+    main_type, sub_type = mimetype.split("/", 1)
+    allegato = MIMEBase(main_type, sub_type)
+    allegato.set_payload(content)
+    encoders.encode_base64(allegato)
+    allegato.add_header("Content-Disposition", "attachment", filename=filename)
+    msg.attach(allegato)
+
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+    payload = json.dumps({"raw": raw}).encode("utf-8")
+
+    req = Request(
+        GMAIL_SEND_ENDPOINT,
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {creds.token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=60) as resp:
+            status = getattr(resp, "status", 200)
+            if int(status) >= 300:
+                return False, f"Gmail API HTTP {status}"
+            return True, "Email con allegato inviata con successo."
+    except HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="ignore")
+        except Exception:
+            detail = str(exc)
+        logger.error("Gmail API error %s (allegato): %s", exc.code, detail)
+        return False, f"Gmail API error {exc.code}: {detail}"
+    except URLError as exc:
+        logger.error("Errore rete Gmail API (allegato): %s", exc)
+        return False, f"Errore rete Gmail API: {exc}"
+    except Exception as exc:
+        logger.error("Invio email con allegato fallito: %s", exc)
+        return False, f"Invio email con allegato fallito: {exc}"
