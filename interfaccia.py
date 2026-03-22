@@ -484,7 +484,7 @@ except Exception:
 
 AUTH_USER_EMAIL = _require_login()
 user_email = AUTH_USER_EMAIL
-# Banner demo: visibile solo quando accede l'account demo.
+# Banner demo_only: visibile solo quando accede l'account demo.
 is_demo_account = False
 if IS_DEMO:
     current_email_norm = str(AUTH_USER_EMAIL or "").strip().lower()
