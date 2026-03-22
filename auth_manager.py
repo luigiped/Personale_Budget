@@ -328,62 +328,42 @@ def create_new_session(email):
     new_token = secrets.token_urlsafe(32)
     expiry = datetime.now(timezone.utc) + timedelta(days=7)
 
-    conn = None
-    cursor = None
     try:
         _ensure_auth_schema_ready()
-        conn = db.connetti_db()
-        cursor = conn.cursor()
-
-        # 1. Inseriamo la sessione (UNA SOLA VOLTA)
-        cursor.execute(
-            """
-            INSERT INTO active_sessions (token, user_email, expires_at)
-            VALUES (%s, %s, %s)
-            """,
-            (new_token, email_norm, expiry.isoformat()),
-        )
-
-        # 2. Aggiorniamo l'ultimo login (opzionale)
-        try:
+        with db.connetti_db() as conn:
+            cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO utenti_notifiche (email, attivo, ultimo_login)
-                VALUES (%s, TRUE, CURRENT_TIMESTAMP)
-                ON CONFLICT (email) DO UPDATE SET
-                    attivo = TRUE,
-                    ultimo_login = CURRENT_TIMESTAMP
+                INSERT INTO active_sessions (token, user_email, expires_at)
+                VALUES (%s, %s, %s)
                 """,
-                (email_norm,),
+                (new_token, email_norm, expiry.isoformat()),
             )
-        except Exception:
-            pass # Se la tabella notifiche non esiste, procediamo comunque
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO utenti_notifiche (email, attivo, ultimo_login)
+                    VALUES (%s, TRUE, CURRENT_TIMESTAMP)
+                    ON CONFLICT (email) DO UPDATE SET
+                        attivo = TRUE,
+                        ultimo_login = CURRENT_TIMESTAMP
+                    """,
+                    (email_norm,),
+                )
+            except Exception:
+                pass
+            cursor.close()
 
-        conn.commit()
-        
-        # 3. Salvataggio nel browser dell'utente
         st.session_state["session_token"] = new_token
         st.session_state["auth_user_email"] = email_norm
         _store_cached_session_user(new_token, email_norm, expiry)
         _set_cookie(SESSION_TOKEN_COOKIE, new_token, expires_at=expiry)
-        
         return True
 
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        st.error(f"Errore tecnico durante la creazione sessione: {e}")
+    except Exception as exc:
+        logger.error("create_new_session: errore per %s: %s", email_norm, exc)
+        st.error(f"Errore tecnico durante la creazione sessione: {exc}")
         return False
-    finally:
-        if cursor: cursor.close()
-        if conn: conn.close()
-
-    # Persistenza lato client: session_state + cookie 7 giorni.
-    st.session_state["session_token"] = new_token
-    st.session_state["auth_user_email"] = email_norm
-    # proviamo a salvare il cookie, ma non esponiamo errori all'interfaccia
-    _set_cookie(SESSION_TOKEN_COOKIE, new_token, expires_at=expiry)
-    return True
 
 
 def clear_session():
@@ -393,22 +373,14 @@ def clear_session():
         or _read_cookie_scalar(SESSION_TOKEN_COOKIE)
     )
     if token:
-        conn = None
-        cursor = None
         try:
             _ensure_auth_schema_ready()
-            conn = db.connetti_db()
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM active_sessions WHERE token = %s", (token,))
-            conn.commit()
-        except Exception:
-            # Anche se la delete fallisce, tentiamo comunque di pulire lato client.
-            pass
-        finally:
-            if cursor:
+            with db.connetti_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM active_sessions WHERE token = %s", (token,))
                 cursor.close()
-            if conn:
-                conn.close()
+        except Exception as exc:
+            logger.warning("clear_session: impossibile rimuovere sessione dal DB: %s", exc)
 
     _clear_local_auth_storage()
 
@@ -436,48 +408,35 @@ def create_demo_session(email):
     new_token = secrets.token_urlsafe(32)
     expiry = datetime.now(timezone.utc) + timedelta(days=7)
 
-    conn = None
-    cursor = None
     try:
         _ensure_auth_schema_ready()
-        conn = db.connetti_db()
-        cursor = conn.cursor()
-
-        cursor.execute(
-            """
-            INSERT INTO active_sessions (token, user_email, expires_at)
-            VALUES (%s, %s, %s)
-            """,
-            (new_token, email_norm, expiry.isoformat()),
-        )
-
-        # Aggiorna o crea l'utente nella tabella notifiche se esiste
-        try:
+        with db.connetti_db() as conn:
+            cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO utenti_notifiche (email, attivo, ultimo_login)
-                VALUES (%s, TRUE, CURRENT_TIMESTAMP)
-                ON CONFLICT (email) DO UPDATE SET
-                    attivo = TRUE,
-                    ultimo_login = CURRENT_TIMESTAMP
+                INSERT INTO active_sessions (token, user_email, expires_at)
+                VALUES (%s, %s, %s)
                 """,
-                (email_norm,),
+                (new_token, email_norm, expiry.isoformat()),
             )
-        except Exception:
-            pass  # la tabella potrebbe non esistere nella demo
-
-        conn.commit()
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        st.error(f"Errore login demo: {e}")
-        return False
-    finally:
-        if cursor:
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO utenti_notifiche (email, attivo, ultimo_login)
+                    VALUES (%s, TRUE, CURRENT_TIMESTAMP)
+                    ON CONFLICT (email) DO UPDATE SET
+                        attivo = TRUE,
+                        ultimo_login = CURRENT_TIMESTAMP
+                    """,
+                    (email_norm,),
+                )
+            except Exception:
+                pass
             cursor.close()
-        if conn:
-            conn.close()
-
+    except Exception as exc:
+        logger.error("create_demo_session: errore per %s: %s", email_norm, exc)
+        st.error(f"Errore login demo: {exc}")
+        return False
     st.session_state["session_token"] = new_token
     st.session_state["auth_user_email"] = email_norm
     _store_cached_session_user(new_token, email_norm, expiry)
@@ -507,33 +466,27 @@ def login_email_password(email, password):
         if not demo_email or email_norm != demo_email:
             return False, "Accesso utenti disabilitato: è attiva solo la modalità demo."
 
-    conn = None
-    cursor = None
     try:
-        conn = db.connetti_db()
-        cursor = conn.cursor()
-        pwd_hash = hashlib.sha256(password.encode()).hexdigest()
-        cursor.execute(
-            f"SELECT email FROM {ACCOUNT_USERS_TABLE} WHERE email = %s AND password_hash = %s LIMIT 1",
-            (email_norm, pwd_hash),
-        )
-        row = cursor.fetchone()
-        # Compatibilità retroattiva: account storici eventualmente salvati in utenti_demo.
-        if not row:
+        with db.connetti_db() as conn:
+            cursor = conn.cursor()
+            pwd_hash = hashlib.sha256(password.encode()).hexdigest()
             cursor.execute(
-                "SELECT email FROM utenti_demo WHERE email = %s AND password_hash = %s LIMIT 1",
+                f"SELECT email FROM {ACCOUNT_USERS_TABLE} WHERE email = %s AND password_hash = %s LIMIT 1",
                 (email_norm, pwd_hash),
             )
             row = cursor.fetchone()
+            if not row:
+                cursor.execute(
+                    "SELECT email FROM utenti_demo WHERE email = %s AND password_hash = %s LIMIT 1",
+                    (email_norm, pwd_hash),
+                )
+                row = cursor.fetchone()
+            cursor.close()
         if not row:
             return False, "Email o password non corretti."
-    except Exception as e:
-        return False, f"Errore DB: {e}"
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+    except Exception as exc:
+        logger.error("login_email_password: %s", exc)
+        return False, f"Errore DB: {exc}"
 
     ok = create_demo_session(email_norm)
     return ok, "" if ok else "Errore creazione sessione."
@@ -553,52 +506,40 @@ def register_demo_user(email, password, nome=""):
     if not password or len(password) < 6:
         return False, "Password troppo corta (minimo 6 caratteri)."
 
-    conn = None
-    cursor = None
     try:
-        conn = db.connetti_db()
-        cursor = conn.cursor()
-        pwd_hash = hashlib.sha256(password.encode()).hexdigest()
-        # Inseriamo i soli campi garantiti; nome_utente è opzionale e dipende dallo schema reale.
-        columns = {"email", "password_hash"}
-        try:
-            cursor.execute(
-                """
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = %s
-                """,
-                (ACCOUNT_USERS_TABLE,),
-            )
-            discovered = {str(r[0]).strip().lower() for r in cursor.fetchall() if r and r[0]}
-            if discovered:
-                columns = discovered
-        except Exception:
-            pass
-
-        insert_cols = ["email", "password_hash"]
-        insert_vals = [email_norm, pwd_hash]
-        if "nome_utente" in columns:
-            insert_cols.append("nome_utente")
-            insert_vals.append(nome.strip() or email_norm.split("@")[0])
-
-        placeholders = ", ".join(["%s"] * len(insert_vals))
-        query = f"INSERT INTO {ACCOUNT_USERS_TABLE} ({', '.join(insert_cols)}) VALUES ({placeholders})"
-        cursor.execute(query, tuple(insert_vals))
-        conn.commit()
+        with db.connetti_db() as conn:
+            cursor = conn.cursor()
+            pwd_hash = hashlib.sha256(password.encode()).hexdigest()
+            columns = {"email", "password_hash"}
+            try:
+                cursor.execute(
+                    """
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = %s
+                    """,
+                    (ACCOUNT_USERS_TABLE,),
+                )
+                discovered = {str(r[0]).strip().lower() for r in cursor.fetchall() if r and r[0]}
+                if discovered:
+                    columns = discovered
+            except Exception:
+                pass
+            insert_cols = ["email", "password_hash"]
+            insert_vals = [email_norm, pwd_hash]
+            if "nome_utente" in columns:
+                insert_cols.append("nome_utente")
+                insert_vals.append(nome.strip() or email_norm.split("@")[0])
+            placeholders = ", ".join(["%s"] * len(insert_vals))
+            query = f"INSERT INTO {ACCOUNT_USERS_TABLE} ({', '.join(insert_cols)}) VALUES ({placeholders})"
+            cursor.execute(query, tuple(insert_vals))
+            cursor.close()
         return True, ""
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        err = str(e)
+    except Exception as exc:
+        logger.error("register_demo_user: %s", exc)
+        err = str(exc)
         if "unique" in err.lower() or "duplicate" in err.lower():
             return False, "Email già registrata."
-        return False, f"Errore registrazione: {e}"
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+        return False, f"Errore registrazione: {exc}"
 
 # Per registrazione utenti in autonomia senza whitelist
 def register_user(email, password):
@@ -610,27 +551,19 @@ def register_user(email, password):
     if mode in {"demo_only", "closed"}:
         return False, "Registrazione temporaneamente disabilitata."
 
-    conn = None
-    cursor = None
     try:
-        conn = db.connetti_db()
-        cursor = conn.cursor()
-
-        # Hash della password
         pwd_hash = hashlib.sha256(password.encode()).hexdigest()
-
-        cursor.execute(
-            """
-            INSERT INTO utenti_registrati (email, password_hash)
-            VALUES (%s, %s)
-            """,
-            (email_norm, pwd_hash),
-        )
-        conn.commit()
+        with db.connetti_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO utenti_registrati (email, password_hash)
+                VALUES (%s, %s)
+                """,
+                (email_norm, pwd_hash),
+            )
+            cursor.close()
         return True, "Registrazione completata!"
-    except Exception as e:
-        if conn: conn.rollback()
-        return False, f"Errore: {e}"
-    finally:
-        if cursor: cursor.close()
-        if conn: conn.close()
+    except Exception as exc:
+        logger.error("register_user: %s", exc)
+        return False, f"Errore: {exc}"
