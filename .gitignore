@@ -5,3 +5,7 @@ token/
 .venv/
 .streamlit/
 *.sql
+*.json
+.DS_Store
+.vscode/
+.idea/
