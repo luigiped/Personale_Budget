@@ -12,6 +12,7 @@ import re
 import base64
 import json
 import os
+from html import escape
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -294,180 +295,549 @@ def _require_login():
     st.stop()
 
 
-# --- CSS PERSONALIZZATO (Stile Dashboard Dark) ---
-st.markdown(
-    """
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
-    :root {
-        --bg: #0b1020;
-        --panel: #141b2d;
-        --panel-2: #101626;
-        --panel-border: rgba(255,255,255,0.08);
-        --text: #e6eef9;
-        --muted: #fffffff0;
-        --accent:#f0b429;
-        --accent-2: #2dd4bf;
-        --accent-3: #f472b6;
-        --good: #22c55e;
-        --bad: #ef4444;
-    }
-    html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
-        background: radial-gradient(1200px 700px at 10% -20%, #0e1426 0%, var(--bg) 50%);
-        color: var(--text);
-        font-family: "IBM Plex Sans", sans-serif;
-    }
-    [data-testid="stSidebar"] {
-        background: #0e1426;
-        border-right: 1px solid rgba(255,255,255,0.06);
-    }
-    [data-testid="stSidebar"] div.stButton > button {
-        padding: 8px 12px !important;
-        height: auto !important;
-        min-height: 25px !important;
-        line-height: 1 !important;
-        font-size: 0.75rem !important;
-        border-radius: 5px !important;
-        margin-top: 5px !important;
-        background-color: transparent !important;
-        color: #ff4b4b !important;
-        border: 1px solid #ff4b4b !important;
-    }
-    h1, h2, h3, h4, h5, h6 {
-        font-family: "Space Grotesk", sans-serif;
-        color: var(--text);
-    }
-    .block-container { padding-top: 4.0rem; }
-    div[data-testid="stMetric"] {
-        background: var(--panel);
-        border: 1px solid var(--panel-border);
-        border-left: 4px solid var(--accent);
-        border-radius: 20px;
-        padding: 10px 30px;
-        box-shadow: 0 8px 20px rgba(0,0,0,0.25);
-    }
-    .stTabs [data-baseweb="tab-list"] { gap: 20px; }
-    .stTabs [data-baseweb="tab"] {
-        height: 44px;
-        background-color: var(--panel-2);
-        color: var(--muted);
-        border-radius: 10px 10px 0 0;
-        padding: 8px 16px;
-        border: 1px solid var(--panel-border);
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: var(--panel);
-        color: var(--text);
-        border-bottom: 2px solid var(--accent);
-    }
-    .section-title {
-        font-size: 1.80rem;
-        letter-spacing: 0.10em;
-        color: var(--muted);
-        text-transform: uppercase;
-        margin-bottom: 0.2rem;
-        font-weight: bold;
-    }
-    .panel-title {
-        font-weight: bold;
-        font-size: 1.20rem;
-        color: var(--text);
-        margin: 0 0 0.0rem 0;
-    }
-    .kpi-note { color: var(--muted); font-size: 0.85rem; }
-    .badge {
-        display: inline-block;
-        padding: 4px 20px;
-        border-radius: 999px;
-        font-size: 0.85rem;
-        letter-spacing: 0.04em;
-        text-transform: uppercase;
-        background: rgba(240,180,41,0.15);
-        color: #facc15;
-        border: 1px solid rgba(240,180,41,0.35);
-    }
-    .badge-green { background: rgba(34,197,94,0.15); color: #46be9a; border-color: rgba(34,197,94,0.35); }
-    .badge-red { background: rgba(239,68,68,0.15); color: #ef4444; border-color: rgba(239,68,68,0.35); }
-    .badge-blue { background: rgba(96,165,250,0.15); color: #60a5fa; border-color: rgba(96,165,250,0.35); }
-    .badge-pink { background: rgba(244,114,182,0.15); color: #f472b6; border-color: rgba(244,114,182,0.35); }
-    .stDataFrame, .stTable { background: var(--panel); }
-    .stPlotlyChart > div {
-        background: var(--panel);
-        border: 2px solid var(--panel-border);
-        border-radius: 20px;
-        padding: 5px;
-        box-shadow: 0 8px 20px rgba(0,0,0,0.25);
-    }
-    .js-plotly-plot text { font-weight: 800 !important; }
-    .side-title { font-weight: 800; font-size: 1.1rem; margin: 0.8rem 0 0.4rem 0; }
-    .side-chip {
-        display: inline-block;
-        padding: 8px 12px;
-        border-radius: 999px;
-        border: 1px solid rgba(96,165,250,0.5);
-        color: #60a5fa;
-        background: rgba(96,165,250,0.12);
-        font-weight: 600;
-        margin-bottom: 0.6rem;
-    }
-    .side-residuo {
-        background: var(--panel);
-        border: 1px solid rgba(34,197,94,0.45);
-        border-radius: 16px;
-        padding: 10px 14px;
-        text-align: center;
-        box-shadow: 0 8px 20px rgba(0,0,0,0.25);
-        color: #22c55e;
-        font-weight: 800;
-        font-size: 1.35rem;
-        letter-spacing: 0.02em;
-    }
-    .side-residuo.neg { border-color: rgba(239,68,68,0.55); color: #ef4444; }
-    .side-residuo .label {
-        display: block;
-        font-size: 0.9rem;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: var(--muted);
-        margin-bottom: 6px;
-    }
-    .side-residuo .pill {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        background: rgba(34,197,94,0.18);
-        border: 1px solid rgba(34,197,94,0.55);
-        color: #22c55e;
-        padding: 6px 10px;
-        border-radius: 999px;
-        font-weight: 800;
-        font-size: 1.2rem;
-    }
-    .side-residuo.neg .pill {
-        background: rgba(239,68,68,0.18);
-        border-color: rgba(239,68,68,0.55);
-        color: #ef4444;
-    }
-    .progress-wrap { margin-top: 6px; }
-    .progress-track {
-        width: 100%;
-        height: 14px;
-        background: rgba(255,255,255,0.12);
-        border-radius: 999px;
-        overflow: hidden;
-        box-shadow: inset 0 0 0 1px rgba(255,255,255,0.05);
-    }
-    .progress-fill {
-        height: 100%;
-        background: linear-gradient(90deg, #22c55e 0%, #34d399 100%);
-        border-radius: 999px;
-    }
-    .block-container { padding-top: 2.1rem; padding-bottom: 0.8rem; }
-    .element-container { margin-bottom: 0rem; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# --- CSS PERSONALIZZATO (Nuovo tema) ---
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500&display=swap');
+
+:root {
+    --bg:          #07090F; /* sfondo principale */
+    --bg-surf:     #0c1120;
+    --bg-card:     #0c1120; /* sfondo card e grafici */
+    --bg-form:     #0F1628;
+    --bg-inp:      #0a1020;
+    --table-bg:    #3D2837;
+    --table-head:  #1A2741;
+    --acc:         #4f8ef0;
+    --acc-lt:      #82b4f7;
+    --acc-dim:     rgba(79,142,240,0.12);
+    --acc-glow:    rgba(79,142,240,0.22);
+    --green:       #2fdd96;
+    --green-dim:   rgba(47,221,150,0.14);
+    --red:         #ff7c73;
+    --red-dim:     rgba(255,124,115,0.14);
+    --amber:       #f5a623;
+    --amber-dim:   rgba(245,166,35,0.10);
+    --violet:      #9b74f5;
+    --violet-dim:  rgba(155,116,245,0.10);
+    --bdr:         rgba(92,118,178,0.20);
+    --bdr-md:      rgba(112,143,215,0.34);
+    --txt:         #ededed;
+    --txt-mid:     #ededed;
+}
+
+/* ── BASE ── */
+html, body,
+[data-testid="stAppViewContainer"],
+[data-testid="stHeader"] {
+    background-color: var(--bg) !important;
+    background-image:
+        radial-gradient(ellipse 100% 60% at 70% -10%, rgba(79,142,240,0.07) 0%, transparent 55%),
+        radial-gradient(ellipse 60% 40% at 5% 90%,   rgba(155,116,245,0.04) 0%, transparent 50%);
+    color: var(--txt);
+    font-family: 'Plus Jakarta Sans', sans-serif;
+}
+/*l'header in corrispondenza Deploy Streamlit */
+[data-testid="stHeader"] {
+    border-bottom: none !important;
+    background: #07090F !important;
+    backdrop-filter: none !important;
+}
+/* Toolbar con i pulsanti Deploy ecc. */
+[data-testid="stToolbar"],
+header[data-testid="stHeader"] > div {
+    background: #07090F !important;
+}
+
+/* ── SIDEBAR ── */
+[data-testid="stSidebar"] {
+    background: var(--bg-surf) !important;
+    border-right: 1px solid var(--bdr) !important;
+    box-shadow: 4px 0 30px rgba(0,0,0,0.35);
+}
+[data-testid="stSidebar"]::before {
+    content: '';
+    display: block;
+    height: 3px;
+    background: linear-gradient(90deg, var(--acc) 0%, #fa598e 60%, transparent 100%);
+}
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] .stMarkdown p {
+    color: var(--txt-mid) !important;
+    font-size: 0.78rem !important;
+}
+/* Bottone Logout nella sidebar */
+html body [data-testid="stSidebar"] div.stButton > button {
+    padding: 5px 14px !important;
+    height: auto !important;
+    min-height: 24px !important;
+    line-height: 1 !important;
+    font-size: 0.75rem !important;
+    font-weight: 600 !important;
+    border-radius: 5px !important;
+    margin-top: 4px !important;
+    background-color: rgba(255,124,115,0.14) !important;
+    color: #ff7c73 !important;
+    border: 1px solid rgba(242,106,106,0.35) !important;
+    transition: background .15s !important;
+}
+html body [data-testid="stSidebar"] div.stButton > button:hover {
+    background-color: rgba(242,106,106,0.28) !important;
+}
+
+/* ── TIPOGRAFIA ── */
+h1, h2, h3, h4, h5, h6 {
+    font-family: 'Plus Jakarta Sans', sans-serif !important;
+    color: var(--txt) !important;
+    letter-spacing: -0.2px;
+}
+
+/* ── BLOCK CONTAINER ── */
+.block-container {
+    padding-top: 1.6rem !important;
+    padding-bottom: 1rem !important;
+}
+.element-container { margin-bottom: 0rem; }
+
+/* ── KPI CARD (st.metric) ── */
+div[data-testid="stMetric"] {
+    background: var(--bg-card) !important;
+    border: 1px solid var(--bdr) !important;
+    border-radius: 10px !important;
+    padding: 14px 18px !important;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4), 0 1px 0 rgba(79,142,240,0.06) inset !important;
+    transition: box-shadow .2s, border-color .2s !important;
+    position: relative;
+    overflow: hidden;
+    text-align: center !important;
+}
+div[data-testid="stMetric"]:hover {
+    border-color: var(--bdr-md) !important;
+}
+/* barra colorata in fondo a ciascuna KPI */
+div[data-testid="stMetric"]::after {
+    content: '';
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, var(--acc), transparent);
+}
+div[data-testid="stMetric"] label {
+    font-size: 0.68rem !important;
+    font-weight: 700 !important;
+    letter-spacing: 1.2px !important;
+    text-transform: uppercase !important;
+    color: var(--txt-mid) !important;
+    display: block !important;
+    text-align: center !important;
+}
+div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 1.65rem !important;
+    font-weight: 700 !important;
+    display: block !important;
+    text-align: center !important;
+    width: 100% !important;
+}
+div[data-testid="stMetric"] [data-testid="stMetricDelta"] {
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 0.72rem !important;
+    display: block !important;
+    text-align: center !important;
+}
+
+/* ── TAB ── */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 2px !important;
+    background: transparent !important;
+    border-bottom: 1px solid var(--bdr) !important;
+}
+.stTabs [data-baseweb="tab"] {
+    height: 44px;
+    background-color: transparent !important;
+    color: var(--txt-mid) !important;
+    border-radius: 0 !important;
+    padding: 8px 20px !important;
+    border: none !important;
+    border-bottom: 2px solid transparent !important;
+    font-family: 'Plus Jakarta Sans', sans-serif !important;
+    font-size: 0.8rem !important;
+    font-weight: 500 !important;
+    transition: color .2s, border-color .2s !important;
+}
+.stTabs [data-baseweb="tab"]:hover {
+    color: var(--txt) !important;
+    background: rgba(79,142,240,0.04) !important;
+}
+.stTabs [aria-selected="true"] {
+    color: var(--acc-lt) !important;
+    border-bottom: 2px solid var(--acc) !important;
+    background: rgba(79,142,240,0.06) !important;
+}
+
+/* ── PLOTLY ── */
+.stPlotlyChart > div {
+    background: var(--bg-card) !important;
+    border: 1px solid var(--bdr) !important;
+    border-radius: 14px !important;
+    padding: 6px !important;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4) !important;
+}
+.js-plotly-plot .xtick text,
+.js-plotly-plot .ytick text,
+.js-plotly-plot .g-xtitle text,
+.js-plotly-plot .g-ytitle text {
+    font-family: 'Plus Jakarta Sans', sans-serif !important;
+    font-weight: 700 !important;
+}
+
+/* ── DATAFRAME / TABLE ── */
+.stDataFrame, .stTable {
+    background: var(--table-bg) !important;
+    border: 1px solid var(--bdr) !important;
+    border-radius: 14px !important;
+    overflow: hidden;
+}
+[data-testid="stDataFrameResizable"] {
+    border-radius: 14px !important;
+    overflow: hidden !important;
+}
+/* header colonne dataframe */
+.stDataFrame th {
+    background: var(--table-head) !important;
+    color: #7f92b9 !important;
+    font-size: 0.64rem !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.9px !important;
+    text-transform: uppercase !important;
+    border-bottom: 1px solid rgba(128,160,232,0.34) !important;
+}
+.stDataFrame td {
+    font-family: 'Plus Jakarta Sans', sans-serif !important;
+    font-size: 0.78rem !important;
+    line-height: 1.08 !important;
+    background: var(--table-bg) !important;
+    border-bottom: 1px solid rgba(128,160,232,0.28) !important;
+}
+/* righe hover */
+.stDataFrame tr:hover td { background: rgba(79,142,240,0.06) !important; }
+
+/* ── 1. INPUT, SELECTBOX, TEXTAREA ── */
+div[data-testid="stSelectbox"] [data-baseweb="select"] > div,
+div[data-testid="stSelectbox"] [data-baseweb="select"] > div:hover,
+div[data-testid="stTextInput"] > div > div,
+div[data-testid="stNumberInput"] > div > div,
+div[data-testid="stDateInput"] > div > div,
+div[data-testid="stTextArea"] > div > div,
+div[data-testid="stMultiSelect"] [data-baseweb="select"] > div {
+    background-color: #090E1B !important;
+    border: 1px solid var(--bdr) !important;
+    color: var(--txt) !important;
+    transition: border-color .2s !important;
+}
+/* Dropdown option list delle selectbox */
+[data-baseweb="popover"] [data-baseweb="menu"],
+[data-baseweb="select"] [role="listbox"],
+ul[data-baseweb="menu"] {
+    background-color: #090E1B !important;
+    border: 1px solid var(--bdr) !important;
+}
+[data-baseweb="option"]:hover {
+    background-color: rgba(79,142,240,0.12) !important;
+}
+
+/* ── CONTAINER con bordo (form, card, ecc.) ── */
+/* Specificità alta: html body prefix per battere gli stili inline di Streamlit */
+html body [data-testid="stVerticalBlockBorderWrapper"] {
+    background-color: #0F1628 !important;
+    border: 1px solid rgba(92,118,178,0.28) !important;
+    border-radius: 14px !important;
+    padding: 24px !important;
+    box-shadow: 0 4px 28px rgba(0,0,0,0.5) !important;
+}
+html body [data-testid="stForm"] {
+    background-color: #0F1628 !important;
+    border: 1px solid rgba(92,118,178,0.28) !important;
+    border-radius: 14px !important;
+    padding: 20px !important;
+}
+/* Blocchi interni → trasparenti per evitare doppio sfondo */
+html body [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stVerticalBlock"],
+html body [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"],
+html body [data-testid="stForm"] [data-testid="stVerticalBlock"] {
+    background-color: transparent !important;
+}
+/* Markup e testo interni → trasparenti */
+html body [data-testid="stVerticalBlockBorderWrapper"] .stMarkdown,
+html body [data-testid="stVerticalBlockBorderWrapper"] .stMarkdown div {
+    background-color: transparent !important;
+}
+
+/* ── PULSANTI PRINCIPALI ── */
+div.stButton > button[kind="primary"],
+div.stButton > button[data-testid="baseButton-primary"] {
+    background: var(--acc) !important;
+    color: #ffffff !important;
+    border: none !important;
+    border-radius: 8px !important;
+    font-family: 'Plus Jakarta Sans', sans-serif !important;
+    font-weight: 600 !important;
+    font-size: 0.82rem !important;
+    letter-spacing: 0.2px !important;
+    box-shadow: 0 4px 14px rgba(79,142,240,0.32) !important;
+    transition: filter .2s, transform .15s !important;
+}
+div.stButton > button[kind="primary"]:hover {
+    filter: brightness(1.12) !important;
+    transform: translateY(-1px) !important;
+}
+div.stButton > button[kind="secondary"],
+div.stButton > button[data-testid="baseButton-secondary"] {
+    background: transparent !important;
+    color: var(--txt-mid) !important;
+    border: 1px solid var(--bdr) !important;
+    border-radius: 8px !important;
+    font-size: 0.82rem !important;
+    transition: border-color .2s, color .2s !important;
+}
+div.stButton > button[kind="secondary"]:hover {
+    border-color: var(--bdr-md) !important;
+    color: var(--txt) !important;
+}
+
+/* ── DOWNLOAD BUTTON ── */
+[data-testid="stDownloadButton"] > button {
+    background: transparent !important;
+    border: 1px solid var(--bdr) !important;
+    border-radius: 8px !important;
+    color: var(--txt) !important;
+    font-size: 0.82rem !important;
+}
+[data-testid="stDownloadButton"] > button:hover {
+    border-color: var(--bdr-md) !important;
+    color: var(--txt) !important;
+}
+
+/* ── CHECKBOX ── */
+[data-testid="stCheckbox"] label {
+    color: var(--txt-mid) !important;
+    font-size: 0.8rem !important;
+}
+[data-testid="stCheckbox"] span[aria-checked] {
+    background: var(--acc) !important;
+    border-color: var(--acc) !important;
+}
+
+/* ── DIVIDER ── */
+hr {
+    border-color: var(--bdr) !important;
+    margin: 1rem 0 !important;
+}
+
+/* ── CAPTION / HELPER TEXT ── */
+.stCaption, [data-testid="stCaptionContainer"] {
+    color: var(--txt) !important;
+    font-size: 0.75rem !important;
+}
+
+/* ── EXPANDER ── */
+[data-testid="stExpander"] {
+    background: var(--bg-card) !important;
+    border: 1px solid var(--bdr) !important;
+    border-radius: 10px !important;
+}
+[data-testid="stExpander"]:hover {
+    border-color: var(--bdr-md) !important;
+}
+[data-testid="stExpander"] summary {
+    font-size: 0.82rem !important;
+    font-weight: 600 !important;
+    color: var(--txt) !important;
+    background: rgba(79,142,240,0.04) !important;
+    border-radius: 10px 10px 0 0 !important;
+}
+
+/* ── ALERT / INFO / WARNING / SUCCESS ── */
+[data-testid="stAlert"] {
+    border-radius: 9px !important;
+    border-left-width: 3px !important;
+    font-size: 0.82rem !important;
+}
+
+/* ── CUSTOM CLASSES (badge, chip, section-title) ── */
+.section-title {
+    font-size: 1.25rem;
+    font-family: 'Plus Jakarta Sans', sans-serif;
+    font-weight: bold;
+    letter-spacing: -0.2px;
+    color: var(--txt);
+    margin-bottom: 0.3rem;
+}
+.panel-title { 
+    font-weight: 700;
+    font-size: 19px;
+    color: var(--txt-mid);
+    margin: 0 0 0.6rem 0;
+    letter-spacing: -0.1px;
+}
+.kpi-note { color: var(--txt-mid); font-size: 0.78rem; }
+
+.badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    font-family: 'JetBrains Mono', monospace;
+    background: var(--acc-dim);
+    color: var(--acc-lt);
+    border: 1px solid rgba(79,142,240,0.28);
+}
+.badge-green { background: var(--green-dim); color: #10d98a; border-color: rgba(16,217,138,0.25); }
+.badge-red   { background: var(--red-dim);   color: #f26a6a; border-color: rgba(242,106,106,0.25); }
+.badge-blue  { background: var(--acc-dim);   color: var(--acc-lt); border-color: rgba(79,142,240,0.28); }
+.badge-pink  { background: var(--violet-dim);color: #9b74f5; border-color: rgba(155,116,245,0.25); }
+
+/* sidebar residuo mese */
+.side-title {
+    font-weight: 700;
+    font-size: 0.75rem;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: var(--txt-mid);
+    margin: 1rem 0 0.4rem 0;
+}
+.side-chip {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 20px;
+    border: 1px solid rgba(79,142,240,0.3);
+    color: var(--acc-lt);
+    background: var(--acc-dim);
+    font-weight: 600;
+    font-size: 0.78rem;
+    font-family: 'JetBrains Mono', monospace;
+    margin-bottom: 0.5rem;
+}
+.side-residuo {
+    background: var(--bg-card);
+    border: 1px solid rgba(16,217,138,0.35);
+    border-radius: 10px;
+    padding: 10px 13px;
+    text-align: center;
+    color: var(--green);
+    font-weight: 700;
+    font-size: 1.1rem;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.02em;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+}
+.side-residuo.neg { border-color: rgba(242,106,106,0.4); color: var(--red); }
+.side-residuo .label {
+    display: block;
+    font-size: 0.65rem;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    font-family: 'Plus Jakarta Sans', sans-serif;
+    color: var(--txt-mid);
+    margin-bottom: 5px;
+    font-weight: 600;
+}
+.side-residuo .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(16,217,138,0.15);
+    border: 1px solid rgba(16,217,138,0.4);
+    color: var(--green);
+    padding: 5px 12px;
+    border-radius: 20px;
+    font-weight: 700;
+    font-size: 1rem;
+    font-family: 'JetBrains Mono', monospace;
+}
+.side-residuo.neg .pill {
+    background: rgba(242,106,106,0.15);
+    border-color: rgba(242,106,106,0.4);
+    color: var(--red);
+}
+
+/* progress bar */
+.progress-wrap { margin-top: 5px; }
+.progress-track {
+    width: 100%;
+    height: 8px;
+    background: rgba(255,255,255,0.07);
+    border-radius: 999px;
+    overflow: hidden;
+}
+.progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--green) 0%, #34d399 100%);
+    border-radius: 999px;
+}
+/* ── FIX INTERNO: testi e markup dentro i container rimangono trasparenti ── */
+[data-testid="stVerticalBlockBorderWrapper"] .stMarkdown div {
+    background-color: transparent !important;
+}
+
+/* ── FORM submit button full width ── */
+div.stFormSubmitButton > button {
+    background: var(--acc) !important;
+    color: #fff !important;
+    border: none !important;
+    border-radius: 8px !important;
+    font-family: 'Plus Jakarta Sans', sans-serif !important;
+    font-weight: 600 !important;
+    font-size: 0.82rem !important;
+    box-shadow: 0 4px 14px rgba(79,142,240,0.32) !important;
+    transition: filter .2s, transform .15s !important;
+}
+div.stFormSubmitButton > button:hover {
+    filter: brightness(1.12) !important;
+    transform: translateY(-1px) !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# --- RESET KPI DENTRO I TAB (Patrimonio, Analisi, ecc.) ---
+# I 4 KPI principali ora sono HTML custom → nessun colore da iniettare su st.metric.
+# Qui resettiamo le metric dentro i tab allo stile compatto desiderato.
+st.markdown("""
+<style>
+/* ── Metric dentro i tab: stile compatto, bianco, allineato a sinistra ── */
+[data-testid="stTabsTabPanel"] div[data-testid="stMetric"] {
+    text-align: left !important;
+    padding: 12px 16px !important;
+}
+[data-testid="stTabsTabPanel"] div[data-testid="stMetric"] label {
+    font-size: 0.65rem !important;
+    font-weight: 600 !important;
+    letter-spacing: 1.1px !important;
+    text-transform: uppercase !important;
+    color: rgba(160,185,230,0.55) !important;
+    text-align: left !important;
+}
+[data-testid="stTabsTabPanel"] div[data-testid="stMetric"] [data-testid="stMetricValue"],
+[data-testid="stTabsTabPanel"] div[data-testid="stMetric"] [data-testid="stMetricValue"] * {
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 1.25rem !important;
+    font-weight: 600 !important;
+    color: #ffffff !important;
+    text-align: left !important;
+}
+[data-testid="stTabsTabPanel"] div[data-testid="stMetric"] [data-testid="stMetricDelta"] {
+    font-size: 0.72rem !important;
+    text-align: left !important;
+}
+/* Rimuove il centramento globale dentro i tab */
+[data-testid="stTabsTabPanel"] div[data-testid="stMetric"] {
+    text-align: left !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # --- AVVIO APP ---
 @st.cache_resource
@@ -762,7 +1132,7 @@ def style_df_currency(df, currency_cols):
 
 
 def style_calendario_scadenze(df):
-    """Evidenzia pagato/non pagato nel calendario scadenze."""
+    """Evidenzia righe calendario con i colori semantici del nuovo tema."""
     if df is None or df.empty:
         return df
 
@@ -773,12 +1143,23 @@ def style_calendario_scadenze(df):
     def _row_style(row):
         stato = str(row.get("Stato", "")).upper()
         if "PAGATO" in stato:
-            return ["background-color: rgba(34,197,94,0.20); color: #e9fff2;" for _ in row]
+            return [
+                "background-color: rgba(16,217,138,0.09);"
+                "border-left: 3px solid #10d98a;"
+                for _ in row
+            ]
         if "IN SCADENZA" in stato:
-            # giallo tenue
-            return ["background-color: rgba(250,204,21,0.20);" for _ in row]
+            return [
+                "background-color: rgba(245,166,35,0.09);"
+                "border-left: 3px solid #f5a623;"
+                for _ in row
+            ]
         if "DA PAGARE" in stato:
-            return ["background-color: rgba(239,68,68,0.12);" for _ in row]
+            return [
+                "background-color: rgba(242,106,106,0.08);"
+                "border-left: 3px solid #f26a6a;"
+                for _ in row
+            ]
         return ["" for _ in row]
 
     return sty.apply(_row_style, axis=1)
@@ -857,25 +1238,222 @@ def style_fig(fig, title=None, height=300, show_legend=True):
     layout_kwargs = dict(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#e6eef9", size=12),
-        margin=dict(l=10, r=10, t=45, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=0),
+        font=dict(
+            family="'Plus Jakarta Sans', sans-serif",
+            color="#dde6f5",
+            size=12,
+        ),
+        margin=dict(l=10, r=10, t=40, b=10),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom", y=1.02,
+            xanchor="left",   x=0,
+            font=dict(size=11, color="#5a6f8c"),
+            bgcolor="rgba(0,0,0,0)",
+        ),
         height=height,
         xaxis_title=None,
         yaxis_title=None,
         showlegend=show_legend,
         legend_title_text="",
-        separators=".",
+        separators=",.",
     )
     if title:
-        layout_kwargs["title"] = dict(text=title, x=0.02, xanchor="left")
+        layout_kwargs["title"] = dict(
+            text=title, x=0.02, xanchor="left",
+            font=dict(size=13, color="#dde6f5", family="'Plus Jakarta Sans', sans-serif"),
+        )
     else:
         layout_kwargs["title_text"] = ""
     fig.update_layout(**layout_kwargs)
-    fig.update_layout(separators=".")
-    fig.update_xaxes(showgrid=False, zeroline=False, tickfont=dict(size=12, color="#fafcff"))
-    fig.update_yaxes(gridcolor="rgba(255,255,255,0.08)", zeroline=False, tickfont=dict(size=12, color="#fafcff"))
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor="rgba(79,142,240,0.08)",
+        zeroline=False,
+        tickfont=dict(size=11, color="#7a8db3", family="'Plus Jakarta Sans', sans-serif"),
+    )
+    fig.update_yaxes(
+        showgrid=False,
+        gridcolor="rgba(79,142,240,0.08)",
+        zeroline=False,
+        tickfont=dict(size=11, color="#7a8db3", family="'Plus Jakarta Sans', sans-serif"),
+    )
     return fig
+def render_calendario_html(df):
+    """Renderizza il calendario spese ricorrenti come tabella HTML stilizzata."""
+    if df is None or df.empty:
+        return "<p style='color:#5a6f8c;font-size:0.82rem;'>Nessuna spesa prevista.</p>"
+
+    def _chip_stato(stato):
+        s = str(stato).upper()
+        if "PAGATO" in s:
+            return ("<span style='display:inline-flex;align-items:center;gap:4px;"
+                    "padding:3px 10px;border-radius:20px;font-size:0.72rem;font-weight:700;"
+                    "background:rgba(16,217,138,0.12);color:#10d98a;"
+                    "border:1px solid rgba(16,217,138,0.3);'>"
+                    "<span style='width:5px;height:5px;border-radius:50%;"
+                    "background:#10d98a;display:inline-block;'></span>"
+                    " ✓ Pagato</span>")
+        if "IN SCADENZA" in s:
+            return ("<span style='display:inline-flex;align-items:center;gap:4px;"
+                    "padding:3px 10px;border-radius:20px;font-size:0.72rem;font-weight:700;"
+                    "background:rgba(245,166,35,0.12);color:#f5a623;"
+                    "border:1px solid rgba(245,166,35,0.3);'>"
+                    "<span style='width:5px;height:5px;border-radius:50%;"
+                    "background:#f5a623;display:inline-block;'></span>"
+                    " ⚠ In scadenza</span>")
+        return ("<span style='display:inline-flex;align-items:center;gap:4px;"
+                "padding:3px 10px;border-radius:20px;font-size:0.72rem;font-weight:700;"
+                "background:rgba(242,106,106,0.10);color:#f26a6a;"
+                "border:1px solid rgba(242,106,106,0.25);'>"
+                "<span style='width:5px;height:5px;border-radius:50%;"
+                "background:#f26a6a;display:inline-block;'></span>"
+                " Da pagare</span>")
+
+    def _chip_freq(freq):
+        return (f"<span style='display:inline-flex;align-items:center;"
+                f"padding:3px 9px;border-radius:20px;font-size:0.72rem;font-weight:600;"
+                f"background:rgba(79,142,240,0.10);color:#82b4f7;"
+                f"border:1px solid rgba(79,142,240,0.25);'>{freq}</span>")
+
+    def _row_bg(stato):
+        s = str(stato).upper()
+        if "PAGATO" in s:
+            return "background:rgba(16,217,138,0.07);border-left:3px solid #10d98a;"
+        if "IN SCADENZA" in s:
+            return "background:rgba(245,166,35,0.07);border-left:3px solid #f5a623;"
+        return "background:rgba(242,106,106,0.06);border-left:3px solid #f26a6a;"
+
+    cols = ["Spesa Prevista", "Importo", "Giorno Previsto",
+            "Data Fine Prevista", "Stato", "Frequenza"]
+
+    header_cells = "".join(
+        f"<th style='padding:8px 13px;font-size:0.68rem;font-weight:700;"
+        f"letter-spacing:1px;text-transform:uppercase;color:#5a6f8c;"
+        f"text-align:left;background:rgba(0,0,0,0.18);"
+        f"border-bottom:1px solid rgba(79,142,240,0.12);white-space:nowrap;'>{c}</th>"
+        for c in cols
+    )
+
+    rows_html = ""
+    for _, row in df.iterrows():
+        stato_val = str(row.get("Stato", ""))
+        bg = _row_bg(stato_val)
+        importo_fmt = format_eur(row.get("Importo", 0), decimals=2)
+        giorno = int(row.get("Giorno Previsto", 0))
+        cells = [
+            f"<td style='padding:10px 13px;font-size:0.85rem;color:#dde6f5;'>{row.get('Spesa Prevista','')}</td>",
+            f"<td style='padding:10px 13px;font-family:\"JetBrains Mono\",monospace;font-size:0.82rem;color:#f26a6a;'>{importo_fmt}</td>",
+            f"<td style='padding:10px 13px;font-family:\"JetBrains Mono\",monospace;font-size:0.82rem;color:#5a6f8c;'>{giorno}</td>",
+            f"<td style='padding:10px 13px;font-size:0.82rem;color:#5a6f8c;'>{row.get('Data Fine Prevista','')}</td>",
+            f"<td style='padding:10px 13px;'>{_chip_stato(stato_val)}</td>",
+            f"<td style='padding:10px 13px;'>{_chip_freq(str(row.get('Frequenza','Mensile')))}</td>",
+        ]
+        rows_html += (
+            f"<tr style='{bg}border-bottom:1px solid rgba(79,142,240,0.05);'>"
+            + "".join(cells) + "</tr>"
+        )
+
+    totale = format_eur(df["Importo"].sum(), decimals=2)
+    n = df.shape[0]
+
+    return f"""
+<div style="border:1px solid rgba(79,142,240,0.12);border-radius:9px;overflow:hidden;margin-top:4px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;
+              padding:9px 14px;background:rgba(79,142,240,0.04);
+              border-bottom:1px solid rgba(79,142,240,0.12);">
+    <span style="font-size:0.68rem;font-weight:700;letter-spacing:1.2px;
+                 text-transform:uppercase;color:#5a6f8c;">
+      Spese pianificate — {n} voci
+    </span>
+    <span style="font-family:'JetBrains Mono',monospace;font-size:0.82rem;color:#82b4f7;">
+      Totale mese: {totale}
+    </span>
+  </div>
+  <div style="overflow-x:auto;">
+    <table style="width:100%;border-collapse:collapse;">
+      <thead><tr>{header_cells}</tr></thead>
+      <tbody>{rows_html}</tbody>
+    </table>
+  </div>
+</div>
+"""
+
+def _chip(label, color, bg, border, size="0.72rem", padding="3px 11px", weight=700):
+    return (
+        f"<span class='reg-chip' style='background:{bg};color:{color};"
+        f"border:1px solid {border};font-size:{size};font-weight:{weight};"
+        f"padding:{padding};'>{escape(str(label))}</span>"
+    )
+
+def _th(txt, align="left"):
+    justify = {"left": "flex-start", "center": "center", "right": "flex-end"}.get(align, "flex-start")
+    return (
+        f"<div style='min-height:36px;display:flex;align-items:center;justify-content:{justify};"
+        f"padding:8px 6px;font-size:0.68rem;font-weight:700;letter-spacing:1px;"
+        f"text-transform:uppercase;color:#7a8db3;text-align:{align};background:var(--table-bg);"
+        f"border-bottom:1px solid rgba(128,160,232,0.34);'>{escape(str(txt))}</div>"
+    )
+
+def _td(txt, mono=False, color="#dde6f5", size="0.92rem", align="left", weight=500, border=True):
+    justify = {"left": "flex-start", "center": "center", "right": "flex-end"}.get(align, "flex-start")
+    font = "font-family:'JetBrains Mono',monospace;" if mono else "font-family:'Plus Jakarta Sans',sans-serif;"
+    border_css = "1px solid rgba(128,160,232,0.28)" if border else "none"
+    return (
+        f"<div style='min-height:58px;display:flex;align-items:center;justify-content:{justify};"
+        f"padding:10px 6px;font-size:{size};font-weight:{weight};line-height:1.18;"
+        f"text-align:{align};background:var(--table-bg);{font}color:{color};border-bottom:{border_css};'>{txt}</div>"
+    )
+
+def _tipo_chip(tipo):
+    tipo_norm = str(tipo or "").strip().upper()
+    if tipo_norm == "ENTRATA":
+        return _chip("ENTRATA", "#10d98a", "rgba(16,217,138,0.12)", "rgba(16,217,138,0.28)")
+    return _chip("USCITA", "#f26a6a", "rgba(242,106,106,0.12)", "rgba(242,106,106,0.28)")
+
+def _reg_table_td(content, align="left", color="#dde6f5", mono=False, weight=400, nowrap=True, title=None):
+    font = "font-family:'JetBrains Mono',monospace;font-size:0.78rem;" if mono else "font-family:'Plus Jakarta Sans',sans-serif;font-size:0.875rem;"
+    white = "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" if nowrap else "white-space:normal;"
+    title_attr = f" title='{escape(str(title))}'" if title else ""
+    return (
+        f"<td style='text-align:{align};color:{color};"
+        f"font-weight:{weight};{font}{white}'{title_attr}>{content}</td>"
+    )
+
+def _reg_table_row(cells):
+    return "<tr>" + "".join(cells) + "</tr>"
+
+def _reg_table_colgroup(widths):
+    total = float(sum(widths) or 1)
+    return "".join(
+        f"<col style='width:{(w / total) * 100:.4f}%;'>"
+        for w in widths
+    )
+
+def _reg_table_th(label, align="left"):
+    return f"<th style='text-align:{align};'>{escape(str(label))}</th>"
+
+def _render_reg_scroll_table(title, right_html, columns, widths, rows_html, height_px=320, empty_message="Nessun dato disponibile."):
+    if not rows_html:
+        rows_html = [
+            f"<tr><td class='reg-html-empty' colspan='{len(columns)}'>{escape(empty_message)}</td></tr>"
+        ]
+    headers = "".join(_reg_table_th(label, align) for label, align in columns)
+    return f"""
+<div class="reg-html-shell">
+  <div class="reg-html-bar">
+    <span class="reg-html-bar-title">{escape(str(title))}</span>
+    <span class="reg-html-bar-value">{right_html}</span>
+  </div>
+  <div class="reg-html-scroll" style="max-height:{int(height_px)}px;">
+    <table class="reg-html-table">
+      <colgroup>{_reg_table_colgroup(widths)}</colgroup>
+      <thead><tr>{headers}</tr></thead>
+      <tbody>{''.join(rows_html)}</tbody>
+    </table>
+  </div>
+</div>
+"""
 
 def show_chart(fig, height=300, show_legend=True):
     fig.update_traces(textfont=dict(size=12))
@@ -892,7 +1470,6 @@ def _fmt_num_it(value, decimals=2):
         return ""
     s = f"{v:,.{decimals}f}"
     return s.replace(",", "X").replace(".", ",").replace("X", ".")
-
 
 def _dialog_elimina_movimento(mov_id, label):
     st.warning("Stai per eliminare il seguente movimento:")
@@ -981,7 +1558,6 @@ with st.sidebar.expander("Impostazioni rapide", expanded=False):
     last_saved_txt = s_txt("quick_settings_last_saved_at", "")
     if last_saved_txt:
         st.caption(f"Ultimo salvataggio: {last_saved_txt}")
-    #st.caption(f"Dati iniziali: {saldo_iniziale_key}, {risp_prev_key}")
 
     with st.form("quick_settings_form", clear_on_submit=False):
         target_perc = st.number_input(
@@ -1190,67 +1766,64 @@ if not df_budget.empty:
 else:
     st.sidebar.caption("Nessun dato budget disponibile.")
 
-# --- KPI SUPERIORI (Sempre visibili) ---
+# --- HEADER TITOLO ---
+st.markdown(
+    f"<div style='font-family:\"Plus Jakarta Sans\",sans-serif; font-size:0.95rem; "
+    f"font-weight:700; letter-spacing:2px; text-transform:uppercase; "
+    f"color:#5a6f8c; margin-bottom:10px;'>"
+    f"{NOME_DISPLAY} — {MONTH_NAMES.get(mese_sel, mese_sel)} {anno_sel}"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+
+# --- KPI SUPERIORI ---
+saldo_iniziale = s_num_candidates(
+    [f"saldo_iniziale_{anno_sel}", f"saldo iniziale_{anno_sel}"], 0.0
+)
+saldo_disponibile = log.saldo_disponibile_da_inizio(df_mov, anno_sel, mese_sel, saldo_iniziale)
 kpi = log.calcola_kpi_dashboard(df_mov, mese_sel, anno_sel)
 
-st.markdown(
-    f"<div class='section-title' style='color: #facc15; font-style: italic;'>" f"{NOME_DISPLAY} - PERSONAL DASHBOARD" f"</div>",unsafe_allow_html=True)
-st.markdown(f"### {MONTH_NAMES.get(mese_sel, mese_sel)} {anno_sel}")
-
-saldo_iniziale = s_num_candidates([f"saldo_iniziale_{anno_sel}", f"saldo iniziale_{anno_sel}"], 0.0)
-saldo_disponibile = log.saldo_disponibile_da_inizio(df_mov, anno_sel, mese_sel, saldo_iniziale)
+def _kpi_card(label, value, color, glow_color):
+    """Renderizza una KPI card HTML con glow effect."""
+    return f"""
+<div style="
+    background:#0c1120;
+    border:1px solid rgba(92,118,178,0.20);
+    border-radius:10px;
+    padding:16px 20px;
+    text-align:center;
+    position:relative;
+    overflow:hidden;
+    box-shadow:0 4px 24px rgba(0,0,0,0.4), 0 0 28px {glow_color};
+    transition:box-shadow .25s;
+">
+  <div style="
+    font-size:0.80rem;font-weight:700;letter-spacing:1.4px;
+    text-transform:uppercase;color:rgba(180,200,240,0.55);
+    margin-bottom:8px;font-family:'Plus Jakarta Sans',sans-serif;
+  ">{label}</div>
+  <div style="
+    font-family:'JetBrains Mono',monospace;
+    font-size:1.6rem;font-weight:700;
+    color:{color};
+    text-shadow:0 0 18px {glow_color};
+    line-height:1.15;
+  ">{value}</div>
+  <div style="
+    position:absolute;bottom:0;left:0;right:0;height:2px;
+    background:linear-gradient(90deg,{color}80,transparent);
+  "></div>
+</div>"""
 
 c1, c2, c3, c4 = st.columns(4)
-
-# Stile comune per le card (sfondo, bordi arrotondati, padding)
-card_style = "background-color: #141B2D; padding: 9px; border-radius: 15px; border: 1px solid #2e364f; height: 100px;"
-distanza = "-15px"
-c1.markdown(f"""
-    <div style="{card_style} text-align: center; display: flex; flex-direction: column; justify-content: center; align-items: center;">
-        <p style='margin: 0 0 {distanza} 0; font-size:20px; color:#ffffff; font-weight:bold; text-transform: uppercase;'>
-            Saldo Disponibile
-        </p>
-        <h2 style='margin:0; color:#41D0A6; font-size:40px;'>
-            {eur2(saldo_disponibile)}
-        </h2>
-    </div>
-""", unsafe_allow_html=True)
-
-# KPI 2: USCITE
-c2.markdown(f"""
-    <div style="{card_style} text-align: center; display: flex; flex-direction: column; justify-content: center; align-items: center;">
-        <p style='margin: 0 0 {distanza} 0; font-size:20px; color:#ffffff; font-weight:bold; text-transform: uppercase;'>
-            Uscite Mese
-        </p>
-        <h2 style='margin:0; color:#FA598E; font-size:40px;'>
-            {eur2(kpi['uscite_mese'])}
-        </h2>
-    </div>
-""", unsafe_allow_html=True)
-
-# KPI 3: RISPARMIO
-c3.markdown(f"""
-    <div style="{card_style} text-align: center; display: flex; flex-direction: column; justify-content: center; align-items: center;">
-        <p style='margin: 0 0 {distanza} 0; font-size:20px; color:#ffffff; font-weight:bold; text-transform: uppercase;'>
-            Risparmio Mese
-        </p>
-        <h2 style='margin:0; color:#41d0a6; font-size:40px;'>
-            {eur2(kpi['risparmio_mese'])}
-        </h2>
-    </div>
-""", unsafe_allow_html=True)
-
-# KPI 4: TASSO
-c4.markdown(f"""
-    <div style="{card_style} text-align: center; display: flex; flex-direction: column; justify-content: center; align-items: center;">
-        <p style='margin: 0 0 {distanza} 0; font-size:20px; color:#ffffff; font-weight:bold; text-transform: uppercase;'>
-            Tasso Risparmio
-        </p>
-        <h2 style='margin:0; color:#9b7ae6; font-size:40px;'>
-            {kpi['tasso_risparmio']}%
-        </h2>
-    </div>
-""", unsafe_allow_html=True)
+with c1:
+    st.markdown(_kpi_card("Saldo Disponibile", eur2(saldo_disponibile), "#5ce488", "rgba(92,228,136,0.18)"), unsafe_allow_html=True)
+with c2:
+    st.markdown(_kpi_card("Uscite Mese", eur2(kpi["uscite_mese"]), "#fa598e", "rgba(250,89,142,0.18)"), unsafe_allow_html=True)
+with c3:
+    st.markdown(_kpi_card("Risparmio Mese", eur2(kpi["risparmio_mese"]), "#5ce488", "rgba(92,228,136,0.18)"), unsafe_allow_html=True)
+with c4:
+    st.markdown(_kpi_card("Tasso Risparmio", f"{kpi['tasso_risparmio']}%", "#9b7fe8", "rgba(155,127,232,0.18)"), unsafe_allow_html=True)
 
 st.divider()
 # --- DATI FILTRATI ---
@@ -1260,7 +1833,7 @@ df_anno = df_mov[df_mov["Data"].dt.year == anno_sel].copy()
 
 # --- TAB INTERFACCIA ---
 tab_home, tab_charts, tab_assets, tab_debts, tab_admin = st.tabs([
-    "🏠 HOME", "📈 ANALISI", "💰 PATRIMONIO", "🏍️ DEBITI", "📝 REGISTRO"
+    "🏠 HOME", "📈 ANALISI", "💰 PATRIMONIO", "🔗 DEBITI", "📝 REGISTRO"
 ])
 
 # --- TAB 1: HOME ---
@@ -1272,13 +1845,13 @@ with tab_home:
     c1, c2 = st.columns([1.35, 1.2])
 
     with c1:
-        st.markdown("<div class='panel-title'>Budget di spesa (50/30/20)</div>", unsafe_allow_html=True)
+        st.markdown("<div class='panel-title'>📊 Budget di spesa (50/30/20)</div>", unsafe_allow_html=True)
         if not df_budget.empty:
             cat_order = list(log.PERCENTUALI_BUDGET.keys())
             colors = {
-                "NECESSITÀ": ("#9b7ae6", "#4b3a75"),
-                "SVAGO": ("#ff5f9b", "#6d2e47"),
-                "INVESTIMENTI": ("#41d0a6", "#1f5e52"),
+                "NECESSITÀ":    ("#4f8ef0", "#1d3a6e"),
+                "SVAGO":        ("#f472b6", "#6d2040"),
+                "INVESTIMENTI": ("#10d98a", "#0a4a36"),
             }
 
             fig_budget = go.Figure()
@@ -1345,15 +1918,15 @@ with tab_home:
                 )
 
             fig_budget.update_layout(barmode="stack", showlegend=False)
-            fig_budget.update_yaxes(categoryorder="array", categoryarray=mesi, autorange="reversed", tickfont=dict(size=12))
-            fig_budget.update_xaxes(tickprefix="€ ", tickfont=dict(size=12), tickformat=".0f")
+            fig_budget.update_yaxes(categoryorder="array", categoryarray=mesi, autorange="reversed", tickfont=dict(size=14))
+            fig_budget.update_xaxes(tickprefix="€ ", tickfont=dict(size=14), tickformat=".0f")
 
             show_chart(fig_budget, height=420, show_legend=False)
         else:
             st.info("Imposta 'budget_mensile_base' o registra spese per vedere il grafico.")
 
     with c2:
-        st.markdown("<div class='panel-title'>Dettaglio spese per categoria </div>", unsafe_allow_html=True)
+        st.markdown("<div class='panel-title'>📂 Dettaglio spese per categoria</div>", unsafe_allow_html=True)
         df_uscite_mese = df_mese[df_mese["Tipo"] == "USCITA"].copy()
         det = log.dettaglio_spese(df_uscite_mese)
         if not det.empty:
@@ -1373,6 +1946,7 @@ with tab_home:
                 texttemplate="<b>%{text}</b>",
                 textposition="auto",
                 textfont=dict(size=14, color="#ffffff", weight="bold"),
+                marker_cornerradius=6,
                 insidetextanchor="middle",
             )
             fig_det.update_yaxes(tickprefix="€ ", tickformat=",.0f")
@@ -1380,7 +1954,7 @@ with tab_home:
         else:
             st.info("Nessuna spesa nel mese selezionato.")
 
-    st.markdown("<div class='panel-title'>Calendario spese ricorrenti</div>", unsafe_allow_html=True)
+    st.markdown("<div class='panel-title'>📅 Calendario spese ricorrenti</div>", unsafe_allow_html=True)
     df_fin_per_cal = df_fin_db.rename(columns={
         "nome": "Nome Finanziamento",
         "capitale_iniziale": "Capitale",
@@ -1442,9 +2016,36 @@ with tab_home:
             tabella_ric = tabella_ric[
                 ["Spesa", "Importo", "Giorno Previsto", "Data Fine Prevista", "Stato", "Frequenza"]
             ].rename(columns={"Spesa": "Spesa Prevista"})
-
-            st.dataframe(style_calendario_scadenze(tabella_ric), use_container_width=True, hide_index=True, height=280)
-
+            
+            # Legenda colori
+            st.markdown(f"""
+<div style="display:flex;align-items:center;justify-content:flex-end;
+            gap:16px;margin-bottom:6px;flex-wrap:wrap;">
+  <span style="font-size:0.68rem;font-weight:700;letter-spacing:1.2px;
+               text-transform:uppercase;color:#5a6f8c;">Legenda:</span>
+  <span style="display:flex;align-items:center;gap:5px;font-size:0.78rem;">
+    <span style="width:9px;height:9px;border-radius:2px;
+                 background:rgba(16,217,138,0.28);border:1px solid #10d98a;
+                 display:inline-block;"></span>
+    <span style="color:#10d98a;font-weight:600;">Pagato</span>
+  </span>
+  <span style="display:flex;align-items:center;gap:5px;font-size:0.78rem;">
+    <span style="width:9px;height:9px;border-radius:2px;
+                 background:rgba(245,166,35,0.28);border:1px solid #f5a623;
+                 display:inline-block;"></span>
+    <span style="color:#f5a623;font-weight:600;">In scadenza</span>
+  </span>
+  <span style="display:flex;align-items:center;gap:5px;font-size:0.78rem;">
+    <span style="width:9px;height:9px;border-radius:2px;
+                 background:rgba(242,106,106,0.22);border:1px solid #f26a6a;
+                 display:inline-block;"></span>
+    <span style="color:#f26a6a;font-weight:600;">Da pagare</span>
+  </span>
+</div>
+""", unsafe_allow_html=True)
+            
+            # Tabella HTML custom
+            st.markdown(render_calendario_html(tabella_ric), unsafe_allow_html=True)
             # Alert scadenze vicine solo per spese ricorrenti non pagate.
             # Calcolo indipendente dal mese selezionato per coprire il cambio mese.
             oggi = date.today()
@@ -1488,7 +2089,7 @@ with tab_charts:
     c1, c2 = st.columns([1, 1], gap="large")
 
     with c1:
-        st.markdown("<div class='panel-title'>Obiettivo risparmio</div>", unsafe_allow_html=True) 
+        st.markdown("<div class='panel-title'>🎯 Obiettivo risparmio</div>", unsafe_allow_html=True) 
         prev_year = anno_sel - 1
         risp_prev = risp_prev_corrente
         target_perc = target_perc_corrente
@@ -1505,117 +2106,104 @@ with tab_charts:
 
             fig_obj = go.Figure()
 
-            # Ombra 3D
-            fig_obj.add_bar(
-                x=[risp_prev],
-                y=[y_prev - 0.12],
-                orientation="h",
-                width=0.42,
-                marker_color="rgba(20,60,50,0.5)",
-                showlegend=False,
-                hoverinfo="skip",
-            )
-            fig_obj.add_bar(
-                x=[accumulo + mancante],
-                y=[y_curr - 0.12],
-                orientation="h",
-                width=0.42,
-                marker_color="rgba(60,20,40,0.45)",
-                showlegend=False,
-                hoverinfo="skip",
-            )
-
-            # Barra 2025 (accumulo)
+            # ── Barra 2025 — verde ──
             fig_obj.add_bar(
                 x=[risp_prev],
                 y=[y_prev],
                 orientation="h",
                 width=0.46,
-                name="Accumulo",
-                marker_color="#41d0a6",
-                marker_line=dict(color="rgba(0,0,0,0.5)", width=1),
+                name=str(prev_year),
+                marker_color="#10d98a",
+                marker_line=dict(color="rgba(0,0,0,0.2)", width=1),
+                marker_cornerradius=6,
                 text=[eur0(risp_prev)],
                 texttemplate="<b>%{text}</b>",
                 textposition="inside",
                 insidetextanchor="middle",
+                textfont=dict(color="#07090f", size=13),
             )
 
-            # Barra 2026 (accumulo + mancante)
+            # ── Barra 2026 ── con overlay: prima sfondo rosso, poi viola sopra
+            if mancante > 0:
+                # Sfondo rosso (barra più lunga = target completo)
+                fig_obj.add_bar(
+                    x=[accumulo + mancante],
+                    y=[y_curr],
+                    orientation="h",
+                    width=0.46,
+                    name="Mancante al target",
+                    marker_color="rgba(242,106,106,0.30)",
+                    marker_line=dict(color="rgba(242,106,106,0.5)", width=1),
+                    marker_cornerradius=6,
+                    hoverinfo="skip",
+                    showlegend=True,
+                )
+
+            # Barra viola (parte accumulata, sovrapposta sopra)
             fig_obj.add_bar(
                 x=[accumulo],
                 y=[y_curr],
                 orientation="h",
                 width=0.46,
-                name="Accumulo",
-                marker_color="#41d0a6",
-                marker_line=dict(color="rgba(0,0,0,0.5)", width=1),
+                name=f"{anno_sel} accumulato",
+                marker_color="#9b74f5",
+                marker_line=dict(color="rgba(0,0,0,0.2)", width=1),
+                marker_cornerradius=6,
                 text=[eur0(accumulo, signed=True)],
                 texttemplate="<b>%{text}</b>",
                 textposition="inside",
                 insidetextanchor="middle",
+                textfont=dict(color="#ffffff", size=13),
                 showlegend=False,
             )
-            fig_obj.add_bar(
-                x=[mancante],
-                y=[y_curr],
-                base=[accumulo],
-                orientation="h",
-                width=0.46,
-                name="Mancante",
-                marker_color="#6d3456",
-                marker_line=dict(color="rgba(0,0,0,0.5)", width=1),
-                text=[eur0(mancante)],
-                texttemplate="<b>%{text}</b>",
-                textposition="inside",
-                insidetextanchor="middle",
-            )
-
-            # Valori a destra
-            fig_obj.add_trace(
-                go.Scatter(
-                    x=[risp_prev],
-                    y=[y_prev],
-                    mode="text",
-                    text=[eur0(risp_prev)],
-                    textposition="middle right",
-                    showlegend=False,
-                )
-            )
-            fig_obj.add_trace(
-                go.Scatter(
-                    x=[accumulo + mancante],
+            if mancante > 0:
+                centro_mancante = accumulo + mancante / 2
+                fig_obj.add_trace(go.Scatter(
+                    x=[centro_mancante],
                     y=[y_curr],
                     mode="text",
-                    text=[eur0(accumulo + mancante)],
-                    textposition="middle right",
+                    text=[eur0(mancante)],
+                    textfont=dict(color="#f26a6a", size=12, weight="bold"),
+                    textposition="middle center",
                     showlegend=False,
-                )
-            )
+                    hoverinfo="skip",
+                ))
 
+            # ── Valori a destra ──
+            fig_obj.add_trace(go.Scatter(
+                x=[risp_prev],
+                y=[y_prev],
+                mode="text",
+                text=[eur0(risp_prev)],
+                textposition="middle right",
+                textfont=dict(color="#5a6f8c", size=12),
+                showlegend=False,
+            ))
             fig_obj.update_layout(
-    barmode="stack",
-    showlegend=False,
-    margin=dict(l=50, r=50, t=30, b=30),
-    annotations=[
-        dict(
-            text=f"<b>Target +{target_perc:.0f}%</b>",
-            x=1,
-            y=1.18,
-            xref="paper",
-            yref="paper",
-            showarrow=False,
-            align="center",
-            font=dict(
-                size=13,
-                color="#000000",
-                weight="bold",
-            ),
-            bgcolor="#D0B136",
-            bordercolor="#141B2D",
-            borderpad=10
-        )
-    ]
-)
+                barmode="overlay",
+                showlegend=True,
+                margin=dict(l=50, r=80, t=40, b=30),
+                annotations=[
+                    dict(
+                        text=f"<b>Target +{target_perc:.0f}%</b>",
+                        x=1, y=1.18,
+                        xref="paper", yref="paper",
+                        showarrow=False,
+                        align="center",
+                        font=dict(size=12, color="#07090f", weight="bold"),
+                        bgcolor="#f5a623",
+                        bordercolor="rgba(0,0,0,0)",
+                        borderpad=8,
+                    )
+                ],
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom", y=1.02,
+                    xanchor="left", x=0,
+                    font=dict(size=11, color="#5a6f8c"),
+                    bgcolor="rgba(0,0,0,0)",
+                ),
+            )
             fig_obj.update_yaxes(
                 tickvals=[y_prev, y_curr],
                 ticktext=[str(prev_year), str(anno_sel)],
@@ -1623,14 +2211,18 @@ with tab_charts:
                 autorange=False,
             )
             max_x = max(risp_prev, accumulo + mancante)
-            fig_obj.update_xaxes(tickprefix="€ ", tickformat=",.0f", range=[0, max_x * 1.2])
-            show_chart(fig_obj, height=300, show_legend=False)
+            fig_obj.update_xaxes(
+                tickprefix="€ ",
+                tickformat=",.0f",
+                range=[0, max_x * 1.22],
+            )
+            show_chart(fig_obj, height=280, show_legend=True)
             
         else:
             st.info(f"Imposta il risparmio dell'anno precedente ({prev_year}) nelle impostazioni rapide.")
         
     with c2:
-        st.markdown("<div class='panel-title'>Andamento entrate</div>", unsafe_allow_html=True)
+        st.markdown("<div class='panel-title'>📈 Andamento entrate</div>", unsafe_allow_html=True)
     
         entrate = log.analizza_entrate(df_mov, anno_sel)
         if not entrate.empty:
@@ -1643,8 +2235,9 @@ with tab_charts:
             fig_ent.add_bar(
                 x=mesi,
                 y=vals,
-                marker_color="#34d399",
+                marker_color="#10d98a",
                 marker_line=dict(color="rgba(0,0,0,0.5)", width=1),
+                marker_cornerradius=6,
                 text=[eur0(v) for v in vals],
                 texttemplate="<b>%{text}</b>",
                 textposition="auto",
@@ -1657,7 +2250,7 @@ with tab_charts:
         else:
             st.info("Nessuna entrata disponibile per l'anno selezionato.")
 
-    st.markdown("<div class='panel-title'>Previsione saldo</div>", unsafe_allow_html=True)
+    st.markdown("<div class='panel-title'>🔮 Previsione saldo</div>", unsafe_allow_html=True)
 
     saldo_iniziale = s_num_candidates([f"saldo_iniziale_{anno_sel}", f"saldo iniziale_{anno_sel}"], 0.0)
     df_prev = log.previsione_saldo(
@@ -1673,21 +2266,20 @@ with tab_charts:
             x="Mese",
             y="Saldo",
             color="Tipo",
-            color_discrete_sequence=["#60a5fa", "#facc15"],
+            color_discrete_sequence=["#4f8ef0", "#f5a623"],
         )
 
         fig_prev.update_layout(
             separators=".,",
-            margin=dict(l=70, r=10, t=10, b=40),
+            margin=dict(l=70, r=10, t=40, b=40),
             legend=dict(
                 orientation="h",
-                xanchor="left",
-                x=0,
-                yanchor="top",
-                y=0.99,
+                xanchor="left", x=0,
+                yanchor="bottom", y=1.02,
                 title=None,
                 bgcolor="rgba(0,0,0,0)",
                 borderwidth=0,
+                font=dict(size=11, color="#5a6f8c"),
             ),
             hovermode="x unified",
         )
@@ -1713,7 +2305,21 @@ with tab_charts:
             range=[min_y - pad, max_y + pad],
         )
 
-        show_chart(fig_prev, show_legend=False, height=300)
+        fig_prev.update_traces(textfont=dict(size=12))
+        style_fig(fig_prev, height=320, show_legend=True)
+        fig_prev.update_layout(
+            legend=dict(
+                orientation="h",
+                xanchor="left", x=0,
+                yanchor="bottom", y=1.02,
+                title=None,
+                bgcolor="rgba(0,0,0,0)",
+                borderwidth=0,
+                font=dict(size=11, color="#5a6f8c"),
+            ),
+            margin=dict(l=70, r=10, t=50, b=40),
+        )
+        st.plotly_chart(fig_prev, use_container_width=True, config=PLOTLY_CONFIG)
 
     else:
         st.info("Dati insufficienti per la previsione saldo.")
@@ -1729,43 +2335,13 @@ with tab_assets:
     # --- PAC ---
     pac_title_col, pac_badge_col = st.columns([3, 2])
     with pac_title_col:
-        st.markdown("<div class='panel-title'>PAC - Piano di Accumulo</div>", unsafe_allow_html=True)
+        st.markdown("<div class='panel-title'>📈 PAC — Piano di Accumulo</div>", unsafe_allow_html=True)
     with pac_badge_col:
         pac_badge_slot = st.empty()
     
     # 1. INPUT SETTINGS (Prende i dati dal tuo DB e dai selettori rapidi)
     tic = pac_ticker_corrente if pac_ticker_corrente else s_txt("pac_ticker", "")
     
-    st.markdown("""
-    <style>
-    [data-testid="stMetric"] {
-        background-color: #141B2D !important;
-        padding: 15px !important;
-        border-radius: 25px !important; 
-        min-height: 80px !important; 
-        border-left: none !important;
-        justify-content: left !important;
-    }
-    [data-testid="stMetricLabel"] p {
-        font-size: 18px !important;
-        font-weight: 500 !important;
-        color: #ffffff !important;
-        margin-bottom: 1px !important;
-    }
-    [data-testid="stMetricValue"] {
-        font-size: 36px !important;
-        font-weight: 500 !important;
-        color: #ffffff !important;
-    }
-    [data-testid="stMetricDelta"] {
-        display: flex !important;
-        justify-content: flex-end !important;  
-        margin-top: auto !important;    
-        font-size: 15px !important;
-        font-weight: 600 !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
 
     # Dati provenienti dal database (già aggregati per ticker)
     q_pac = pac_quote_corrente          # Quote possedute oggi (input rapido)
@@ -1797,14 +2373,16 @@ with tab_assets:
             unsafe_allow_html=True,
         )
         st.markdown(
-    f"""
-    <div style="font-size: 20px; font-weight: 500; color:#5CE488; margin-bottom: 10px;">
-        Versamento mese: {eur2(pac_vers)} | 
-        Rendimento annuo stimato: {pac_rend:.2f}%
-    </div>
-    """, 
-    unsafe_allow_html=True
-)
+            f"""<div style="display:flex;align-items:center;gap:10px;padding:9px 13px;
+                border-radius:8px;font-size:0.88rem;color:#5a6f8c;margin-bottom:12px;
+                background:rgba(16,217,138,0.05);border:1px solid rgba(16,217,138,0.2);">
+                <span style="color:#10d98a;">●</span>
+                Versamento mensile: <strong style="color:#dde6f5;margin:0 4px;">{eur2(pac_vers)}</strong>
+                &nbsp;|&nbsp;
+                Rendimento annuo stimato: <strong style="color:#10d98a;margin:0 4px;">{pac_rend:.2f}%</strong>
+            </div>""",
+            unsafe_allow_html=True,
+        )
         
 
         k1, k2, k3, k4 = st.columns(4)
@@ -1812,8 +2390,16 @@ with tab_assets:
         k2.metric("Rendimento", eur2(s["P&L"], signed=True), f"{s['P&L %']}%")
         k3.metric("Tasse plusvalenze", eur2(s["Imposte"]))
         k4.metric("Netto smobilizzo", eur2(s["Netto"]))
-        st.caption(f"Versato PAC da registro ({anno_sel}): {eur2(s.get('Versato_Reale_Registro_Anno', s['Versato_Reale_Registro']))}")
-        st.markdown("<div class='panel-title'> Proiezione PAC </div>", unsafe_allow_html=True)
+        st.markdown(
+            f"""<div style="display:flex;align-items:baseline;justify-content:space-between;margin:4px 0 8px 0;">
+        <div class='panel-title' style='margin:0;'> Proiezione PAC </div>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:0.78rem;
+                    color:#5a6f8c;letter-spacing:0.2px;">
+            Versamento PAC da registro ({anno_sel}): <strong style="color:#82b4f7;">{eur2(s.get('Versato_Reale_Registro_Anno', s['Versato_Reale_Registro']))}</strong>
+        </span>
+        </div>""",
+    unsafe_allow_html=True,
+)
         # --- GRAFICO AGGIORNATO ---
         df_pac = res_pac["Grafico_Proiezione"]
         
@@ -1872,7 +2458,7 @@ with tab_assets:
     st.divider()
 
     # --- FONDO PENSIONE ---
-    st.markdown("<div class='panel-title'>Fondo Pensione</div>", unsafe_allow_html=True)
+    st.markdown("<div class='panel-title'>🏦 Fondo Pensione</div>", unsafe_allow_html=True)
     valore_quota = fondo_valore_quota_corrente
     q_fondo = fondo_quote_corrente
     inv_fondo = fondo_capitale_base_corrente
@@ -1922,7 +2508,12 @@ with tab_assets:
         st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
         # Progress Bar Layout
-        st.markdown(f"<b>Avanzamento versamento</b> ({res_fondo['Avanzamento_Fiscale']['Percentuale']}%)", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='font-size: 1.1rem; font-weight: bold; margin-bottom: 5px;'>"
+            f"Avanzamento versamento ({res_fondo['Avanzamento_Fiscale']['Percentuale']}%)"
+            f"</div>", 
+            unsafe_allow_html=True
+)
         st.markdown(
             f"""
             <div class='progress-wrap'>
@@ -1933,10 +2524,13 @@ with tab_assets:
             """,
             unsafe_allow_html=True,
         )
-        st.caption(
+        st.markdown(
+            f"<div style='font-size: 0.95rem; color: #5a6f8c; margin-top: 5px;'>"
             f"Versato anno: {eur2(res_fondo['Avanzamento_Fiscale']['Versato_Anno'])} | "
             f"Rimanente soglia: {eur2(res_fondo['Avanzamento_Fiscale']['Rimanente_Soglia'])}"
-        )
+            f"</div>",
+            unsafe_allow_html=True
+)
 
         df_fondo = res_fondo["Grafico_Proiezione"].copy()
         mesi = df_fondo["Mese"].tolist()
@@ -1978,8 +2572,16 @@ with tab_assets:
 
         fig_fondo.update_xaxes(tickvals=tickvals, ticktext=ticktext)
         fig_fondo.update_yaxes(tickprefix="€ ", tickformat=",.0f")
-        st.markdown("<div class='panel-title'> Proiezione Fondo Pensione </div>", unsafe_allow_html=True)
-        st.caption(f"Proiezione 30 anni con rendimento annuo stimato: {rendimento_fondo:.2f}%")
+        st.markdown(
+        f"""<div style="display:flex;align-items:baseline;justify-content:space-between;margin:4px 0 8px 0;">
+    <div class='panel-title' style='margin:0;'> Proiezione Fondo Pensione </div>
+    <span style="font-family:'JetBrains Mono',monospace;font-size:0.78rem;
+                color:#5a6f8c;letter-spacing:0.2px;">
+        Proiezione 30 anni — rendimento stimato: <strong style="color:#82b4f7;">{rendimento_fondo:.2f}%</strong>
+    </span>
+    </div>""",
+        unsafe_allow_html=True,
+    )
         style_fig(fig_fondo, height=380, show_legend=True)
         fig_fondo.update_layout(
             legend=dict(
@@ -2014,6 +2616,7 @@ with tab_assets:
                 comp["Dettaglio"],
                 names="Asset",
                 values="Valore",
+                hole=0.35,
                 color_discrete_sequence=COLOR_SEQ,
             )
             fig_comp.update_traces(
@@ -2029,7 +2632,7 @@ with tab_assets:
             show_chart(fig_comp, height=300, show_legend=False)
 
     with r2:
-        st.markdown("<div class='panel-title'>Versamenti PAC / Fondo</div>", unsafe_allow_html=True)
+        st.markdown("<div class='panel-title'>💸 Versamenti PAC / Fondo</div>", unsafe_allow_html=True)
         df_inv = df_mov[
             (df_mov["Categoria"] == "INVESTIMENTI") &
             (df_mov["Tipo"] == "USCITA") &
@@ -2087,7 +2690,7 @@ with tab_assets:
         else:
             st.info("Nessun versamento registrato per l'anno selezionato.")
 
-    st.markdown("<div class='panel-title'>Variazione investimenti (anno precedente vs attuale)</div>", unsafe_allow_html=True)
+    st.markdown("<div class='panel-title'>📊 Variazione investimenti (anno precedente vs attuale)</div>", unsafe_allow_html=True)
     anno_precedente = int(anno_sel) - 1
     var_inv = log.variazione_investimenti(df_mov, anno_sel)
     investito_precedente = var_inv["Anno_Precedente"]
@@ -2104,7 +2707,9 @@ with tab_assets:
             name="PAC",
             marker_color="#EF4444",
             text=[eur0(v) if v > 0 else "" for v in pac_vals],
+            marker_cornerradius=6,
             textposition="inside",
+            
             textfont=dict(color="#ffffff", size=12),
         )
         fig_var.add_bar(
@@ -2114,6 +2719,7 @@ with tab_assets:
             marker_color="#FDC82F",
             text=[eur0(v) if v > 0 else "" for v in fondo_vals],
             textposition="inside",
+            marker_cornerradius=6,
             textfont=dict(color="#ffffff", size=12),
         )
         fig_var.update_layout(
@@ -2165,18 +2771,18 @@ with tab_debts:
     # ===== COLORI TEMA WEB APP =====
     APP_BG = "#0f172a"        
     PANEL_BG = "#111827"      
-    TEXT_COLOR = "#e5e7eb"    
-
-    # FINANZIAMENTI
-    COLOR_PAGATO = "#34d399"
-    # Trasformiamo l'esadecimale con opacità in RGBA
-    COLOR_RESIDUO = hex_to_rgba("#fa5a8d76") 
-    COLOR_RESIDUO_pie = "#fa5a8e"  # versione piena per torta
+    TEXT_COLOR = "#e5e7eb"
+    # Colori tema finanziamenti
+    COLOR_PAGATO       = "#10d98a"
+    COLOR_RESIDUO      = "rgba(242,106,106,0.40)"
+    COLOR_RESIDUO_pie  = "#f26a6a"
+    COLOR_INT_PAGATI   = "#10d98a"
+    COLOR_INT_RESIDUI  = "rgba(242,106,106,0.40)"   
 
     # INTERESSI
     COLOR_INT_PAGATI = "#34d399"
     # Trasformiamo l'esadecimale con opacità in RGBA
-    COLOR_INT_RESIDUI = hex_to_rgba("#fa5a8d76")
+    COLOR_INT_RESIDUI = hex_to_rgba("#f26a6a66")
 
     fin_rows = []
     dettagli_rows = []
@@ -2249,6 +2855,7 @@ with tab_debts:
                 orientation="h",
                 name="Totale pagato",
                 marker_color=COLOR_PAGATO,   # ← COLORE PAGATO
+                marker_cornerradius=6,
                 text=df_prog["Pagato"].map(eur0),
                 textposition="inside",
                 insidetextanchor="middle",
@@ -2264,6 +2871,7 @@ with tab_debts:
                 orientation="h",
                 name="Debito residuo",
                 marker_color=COLOR_RESIDUO,  # ← COLORE RESIDUO
+                marker_cornerradius=6,
                 text=df_prog["Residuo"].map(eur0),
                 textposition="inside",
                 insidetextanchor="middle",
@@ -2273,36 +2881,35 @@ with tab_debts:
         )
             )
 
+            fig_prog.update_layout(barmode="stack")
+            style_fig(fig_prog, height=320, show_legend=True)
             fig_prog.update_layout(
-                title=dict(text="FINANZIAMENTI", 
-                           x=0.5, 
-                           xanchor='center', 
-                           y=0.95, yanchor='middle'),
-                barmode="stack",
-                height=300,
-                paper_bgcolor=APP_BG,        # ← SFONDO APP
-                plot_bgcolor=PANEL_BG,       # ← SFONDO GRAFICO
-                font=dict(color=TEXT_COLOR),
+                title=dict(
+                    text="FINANZIAMENTI",
+                    x=0.5, xanchor="center",
+                    font=dict(size=15, color="#dde6f5"),
+                ),
                 legend=dict(
                     orientation="h",
-                    x=0.45,
-                    xanchor="center",
-                    y=1.45
+                    yanchor="bottom", y=0.97,
+                    xanchor="left", x=0,
+                    bgcolor="rgba(0,0,0,0)",
+                    font=dict(size=11, color="#5a6f8c"),
                 ),
+                margin=dict(l=10, r=10, t=60, b=10),
                 xaxis=dict(tickprefix="€ ", tickformat=",.0f"),
-                separators=",."
+                separators=",.",
             )
-
-            fig_prog.update_xaxes(showgrid=False)
+            fig_prog.update_xaxes(showgrid=True)
             fig_prog.update_yaxes(showgrid=False)
 
-            st.plotly_chart(fig_prog, use_container_width=True)
+            st.plotly_chart(fig_prog, use_container_width=True, config=PLOTLY_CONFIG)
 
     with c2:
         fig_pie = go.Figure(go.Pie(
             labels=["Pagato", "Residuo"],
             values=[totale_pagato, totale_residuo],
-            hole=0,
+            hole=0.35,
             textinfo="percent",
             marker=dict(
                 colors=[COLOR_PAGATO, COLOR_RESIDUO_pie]  # ← COLORI TORTA
@@ -2315,20 +2922,26 @@ with tab_debts:
             domain=dict(x=[0, 1], y=[0.1, 0.90])
         ))
 
+        style_fig(fig_pie, height=320, show_legend=True)
         fig_pie.update_layout(
-            title=dict(text="POSIZIONE DEBITI", 
-            x=0.5, xanchor='center',
-            y=0.95, yanchor='middle'),
-            height=300,                 # altezza pannello invariata
-            showlegend=False,
-            paper_bgcolor=APP_BG,       # sfondo app
-            plot_bgcolor=PANEL_BG,      # sfondo grafico
-            font=dict(color=TEXT_COLOR),
-            margin=dict(t=10, b=10, l=10, r=10),
-            separators=",."
+            title=dict(
+                text="POSIZIONE DEBITI",
+                x=0.5, xanchor="center",
+                font=dict(size=15, color="#dde6f5"),
+            ),
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom", y=0.97,
+                xanchor="left", x=0,
+                bgcolor="rgba(0,0,0,0)",
+                font=dict(size=11, color="#5a6f8c"),
+            ),
+            margin=dict(t=60, b=10, l=10, r=10),
+            separators=",.",
         )
 
-        st.plotly_chart(fig_pie, use_container_width=True)
+        st.plotly_chart(fig_pie, use_container_width=True, config=PLOTLY_CONFIG)
 
     c3, c4 = st.columns([1.4, 1], gap="large")
 
@@ -2341,6 +2954,7 @@ with tab_debts:
             orientation="h",
             name="Quota interessi",
             marker_color=COLOR_INT_PAGATI,  # ← COLORE INTERESSI PAGATI
+            marker_cornerradius=6,
             text=[eur0(interessi_pagati)],
             textposition="inside",
             insidetextanchor="middle",
@@ -2356,6 +2970,7 @@ with tab_debts:
             orientation="h",
             name="Interessi residui",
             marker_color=COLOR_INT_RESIDUI, # ← COLORE INTERESSI RESIDUI
+            marker_cornerradius=6,
             text=[eur0(interessi_residui)],
             textposition="inside",
             insidetextanchor="middle",
@@ -2365,30 +2980,29 @@ with tab_debts:
             )
         )
 
+        fig_int.update_layout(barmode="stack")
+        style_fig(fig_int, height=220, show_legend=True)
         fig_int.update_layout(
-            title=dict(text="INTERESSI PAGATI", 
-                       x=0.5, xanchor='center', 
-                       y=0.95, yanchor='middle'),
-            barmode="stack",
-            height=300,
-            paper_bgcolor=APP_BG,
-            plot_bgcolor=PANEL_BG,
-            font=dict(color=TEXT_COLOR),
+            title=dict(
+                text="INTERESSI PAGATI",
+                x=0.5, xanchor="center",
+                font=dict(size=15, color="#dde6f5"),
+            ),
             legend=dict(
                 orientation="h",
-                x=0.45,
-                xanchor="center",
-                y=1.35
+                yanchor="bottom", y=0.97,
+                xanchor="left", x=0,
+                bgcolor="rgba(0,0,0,0)",
+                font=dict(size=11, color="#5a6f8c"),
             ),
+            margin=dict(l=10, r=10, t=60, b=10),
             xaxis=dict(tickprefix="€ ", tickformat=",.0f"),
-            separators=",."
-
+            separators=",.",
         )
-
-        fig_int.update_xaxes(showgrid=False)
+        fig_int.update_xaxes(showgrid=True)
         fig_int.update_yaxes(showgrid=False)
 
-        st.plotly_chart(fig_int, use_container_width=True)
+        st.plotly_chart(fig_int, use_container_width=True, config=PLOTLY_CONFIG)
 
     with c4:
         df_tabella = pd.DataFrame(
@@ -2398,317 +3012,797 @@ with tab_debts:
         if df_tabella.empty:
             st.caption("Nessun finanziamento da mostrare.")
         else:
-            st.dataframe(
-                style_finanziamento(df_tabella),
-                use_container_width=True,
-                hide_index=True
-            )
+            debt_rows_html = []
+            for _, row in df_tabella.iterrows():
+                perc = float(str(row["% Completato"]).replace("%",""))
+                perc_color = "#10d98a" if perc >= 50 else "#f5a623" if perc >= 25 else "#f26a6a"
+                mesi = int(row["Mesi rim."])
+                mesi_color = "#f26a6a" if mesi > 120 else "#f5a623" if mesi > 36 else "#10d98a"
+                small_font_style = "font-size: 0.82rem; white-space: nowrap;"
+
+                debt_rows_html.append(
+                    _reg_table_row([
+                        _reg_table_td(f"<span style='{small_font_style}'><strong>{escape(str(row['Nome']))}</strong></span>", color="#dde6f5", weight=600),
+                        _reg_table_td(f"<span style='{small_font_style}'>{eur2(row['Rata'])}</span>", color="#f26a6a", mono=True, weight=600),
+                        _reg_table_td(f"<span style='{small_font_style}'>{eur2(row['Residuo'])}</span>", color="#dde6f5", mono=True),
+                        _reg_table_td(f"<span style='{small_font_style}'>{perc:.1f}%</span>", color=perc_color, mono=True, align="center"),
+                        _reg_table_td(f"<span style='{small_font_style}'>{str(mesi)}</span>", color=mesi_color, mono=True, align="center"),
+                    ])
+                )
+            st.markdown(
+            _render_reg_scroll_table(
+                title="Riepilogo finanziamenti",
+                right_html="",
+                columns=[
+                    ("Nome",         "center"),
+                    ("Rata",         "center"),  
+                    ("Residuo",      "center"),  
+                    ("% Compl.",     "center"),
+                    ("Mesi",         "left"),
+                ],
+                widths=[1.4, 1.1, 1.5, 0.9, 0.7], 
+                rows_html=debt_rows_html,
+                height_px=230,
+            ),
+            unsafe_allow_html=True,
+        )
 
 # --- TAB 5: REGISTRO ---
 with tab_admin:
-    st.subheader("Nuova Transazione")
+    st.markdown("<div class='section-title'>Registro</div>", unsafe_allow_html=True)
+ 
+    # ── NUOVA TRANSAZIONE ──
+    # CSS aggiuntivo per i toggle Uscita/Entrata
+    st.markdown("""
+<style>
+/* label campo sopra input */
+div[data-testid="stVerticalBlock"] label[data-testid="stWidgetLabel"] p {
+    font-size: 0.76rem !important;
+    font-weight: 700 !important;
+    letter-spacing: 1.15px !important;
+    text-transform: uppercase !important;
+    color: #7487ad !important;
+}
+/* ── Radio toggle Uscita/Entrata ── */
+div[data-testid="stRadio"] > div[role="radiogroup"] {
+    display: flex !important;
+    flex-direction: row !important;
+    gap: 0 !important;
+    background: rgba(10,16,32,0.96) !important;
+    border: 1px solid rgba(112,143,215,0.20) !important;
+    border-radius: 14px !important;
+    overflow: hidden !important;
+    padding: 0px !important;
+    width: 100% !important;
+    min-height: 56px !important;
+    box-shadow: inset 0 1px 0 rgba(14,217,138,0.20) !important;
+}
+div[data-testid="stRadio"] > div[role="radiogroup"] > label {
+    flex: 1 !important;
+    text-align: center !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    height: 56px !important;      
+    min-height: 56px !important;  
+    padding: 0px!important;     
+    font-size: 0.82rem !important; 
+    margin: 0 !important;
+    font-weight: 700 !important;
+    color: #7083a9 !important;
+    cursor: pointer !important;
+    transition: all 0.15s !important;
+    border-right: 1px solid rgba(112,143,215,0.14) !important;
+    background: transparent !important;
+}
+div[data-testid="stRadio"] > div[role="radiogroup"] > label > div:last-child {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 100% !important;
+    height: 56px !important; 
+    line-height: 1 !important;
+    margin: 0 !important;
+    padding: 0px!important;
+}
+div[data-testid="stRadio"] > div[role="radiogroup"] > label:last-child {
+    border-right: none !important;
+}
+div[data-testid="stRadio"] > div[role="radiogroup"] > label > div:last-child {
+    width: 100% !important;
+    display: flex !important;
+    justify-content: center !important;
+}
+/* Nascondi il pallino */
+div[data-testid="stRadio"] > div[role="radiogroup"] > label > div:first-child {
+    display: none !important;
+}
+/* radio a 2 opzioni: Uscita / Entrata */
+div[data-testid="stRadio"] > div[role="radiogroup"] > label:first-child:has(input:checked) {
+    background: rgba(255,124,115,0.16) !important;
+    color: #EF696A !important;
+    box-shadow: inset 0 0 0 1px rgba(255,124,115,0.16) !important;
+}
+div[data-testid="stRadio"] > div[role="radiogroup"] > label:last-child:has(input:checked) {
+    background: rgba(47,221,150,0.15) !important;
+    color: #42e7a7 !important;
+    box-shadow: inset 0 0 0 1px rgba(47,221,150,0.14) !important;
+}
+/* radio a 3 opzioni: Tutte / Uscita / Entrata */
+div[data-testid="stRadio"] > div[role="radiogroup"]:has(label:nth-child(3)) > label:nth-child(1):has(input:checked) {
+    background: rgba(79,142,240,0.14) !important;
+    color: #8db8ff !important;
+    box-shadow: inset 0 0 0 1px rgba(79,142,240,0.16) !important;
+}
+div[data-testid="stRadio"] > div[role="radiogroup"]:has(label:nth-child(3)) > label:nth-child(2):has(input:checked) {
+    background: rgba(255,124,115,0.16) !important;
+    color: #EF696A !important;
+    box-shadow: inset 0 0 0 1px rgba(255,124,115,0.16) !important;
+}
+div[data-testid="stRadio"] > div[role="radiogroup"]:has(label:nth-child(3)) > label:nth-child(3):has(input:checked) {
+    background: rgba(47,221,150,0.15) !important;
+    color: #42e7a7 !important;
+    box-shadow: inset 0 0 0 1px rgba(47,221,150,0.14) !important;
+}
+/* ── Tabelle Registro HTML ── */
+.reg-html-shell {
+    border: 1px solid rgba(79,142,240,0.15);
+    border-radius: 14px;
+    overflow: hidden;
+    background: #0c1120;
+    margin-bottom: 0;
+}
+.reg-html-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 16px;
+    background: rgba(79,142,240,0.05);
+    border-bottom: 1px solid rgba(79,142,240,0.12);
+}
+.reg-html-bar-title {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: #5a6f8c;
+}
+.reg-html-bar-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.82rem;
+    color: #82b4f7;
+    white-space: nowrap;
+}
+.reg-html-scroll {
+    overflow-y: auto;
+    overflow-x: hidden;
+    background: #0c1120;
+}
+.reg-html-scroll::-webkit-scrollbar { width: 6px; }
+.reg-html-scroll::-webkit-scrollbar-track { background: transparent; }
+.reg-html-scroll::-webkit-scrollbar-thumb {
+    background: rgba(79,142,240,0.18);
+    border-radius: 999px;
+}
+.reg-html-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    background: #0c1120;
+}
+/* Header colonne */
+.reg-html-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    padding: 10px 14px;
+    background: #0c1120;
+    color: #5a6f8c;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    border-bottom: 1px solid rgba(79,142,240,0.12);
+    white-space: nowrap;
+}
+/* Righe body */
+.reg-html-table tbody tr {
+    background: #0c1120;
+    transition: background 0.1s;
+}
+.reg-html-table tbody tr:hover {
+    background: rgba(79,142,240,0.04);
+}
+.reg-html-table tbody td {
+    padding: 14px 14px;
+    background: transparent;
+    color: #dde6f5;
+    font-size: 0.875rem;
+    line-height: 1.3;
+    border-bottom: 1px solid rgba(79,142,240,0.07);
+    vertical-align: middle;
+}
+.reg-html-table tbody tr:last-child td {
+    border-bottom: none;
+}
+/* Cella vuota / empty state */
+.reg-html-empty {
+    padding: 24px 16px !important;
+    text-align: center !important;
+    color: #5a6f8c !important;
+    font-size: 0.875rem !important;
+}
+/* Chip badge */
+.reg-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 3px 11px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    white-space: nowrap;
+    line-height: 1.6;
+}
+/* Elimina button sotto tabella */
+.reg-del-row-btn div.stButton > button {
+    background: rgba(242,106,106,0.10) !important;
+    color: #f26a6a !important;
+    border: 1px solid rgba(242,106,106,0.25) !important;
+    border-radius: 8px !important;
+    font-size: 0.8rem !important;
+    font-weight: 600 !important;
+    padding: 6px 14px !important;
+    min-height: 35px !important;
+    height: auto !important;
+    line-height: 1 !important;
+    transition: background .15s !important;
+}
+.reg-del-row-btn div.stButton > button:hover {
+    background: rgba(242,106,106,0.18) !important;
+}
+</style>
+""", unsafe_allow_html=True)
+ 
+    # Banner conferma movimento (mostrato nel ciclo dopo il rerun)
+    if st.session_state.pop("_banner_mov", False):
+        st.success("✅ Movimento registrato con successo!")
 
-    c_cat, c_det = st.columns(2)
-    categoria_scelta = c_cat.selectbox("Categoria", list(log.STRUTTURA_CATEGORIE.keys()))
-    dettagli_filtrati = log.STRUTTURA_CATEGORIE[categoria_scelta]
-    dettaglio_scelto = c_det.selectbox("Dettaglio", dettagli_filtrati)
-
-    with st.form("form_inserimento_dati", clear_on_submit=True):
-        col_imp, col_data, col_tipo = st.columns(3)
-        importo_inserito = col_imp.number_input("Importo (€)", min_value=0.0, step=0.01)
-        data_inserita = col_data.date_input("Data", datetime.now())
-        tipo_inserito = col_tipo.selectbox("Tipo", ["USCITA", "ENTRATA"])
-        note_inserite = st.text_input("Note")
-
-        if st.form_submit_button("REGISTRA MOVIMENTO"):
-            db.aggiungi_movimento(data_inserita, tipo_inserito, categoria_scelta, dettaglio_scelto, importo_inserito, note_inserite, user_email=user_email)
-            st.success("Movimento salvato!")
-            st.rerun()
-
-    st.divider()
-    st.subheader("Spese ricorrenti")
-    with st.form("form_spese_ricorrenti", clear_on_submit=True):
-        c_desc, c_imp = st.columns([2, 1])
-        descrizione = c_desc.text_input("Descrizione spesa ricorrente")
-        importo = c_imp.number_input("Importo (€)", min_value=0.0, step=0.01)
-
-        c_giorno, c_freq = st.columns(2)
-        giorno_scad = c_giorno.number_input("Giorno scadenza", min_value=1, max_value=31, step=1, value=1)
-        freq_options = {
-            "Mensile": 1,
-            "Bimestrale": 2,
-            "Trimestrale": 3,
-            "Quadrimestrale": 4,
-            "Semestrale": 6,
-            "Annuale": 12,
-        }
-        freq_label = c_freq.selectbox("Frequenza", list(freq_options.keys()), index=0)
-        freq = freq_options[freq_label]
-
-        c_start, c_end = st.columns(2)
-        data_inizio = c_start.date_input("Data inizio", datetime.now())
-        senza_fine = c_end.checkbox("Senza data fine", value=False)
-        data_fine = None if senza_fine else c_end.date_input("Data fine", datetime.now())
-
-        if st.form_submit_button("AGGIUNGI RICORRENTE"):
-            if descrizione and importo > 0:
-                db.aggiungi_spesa_ricorrente(descrizione, importo, giorno_scad, freq, data_inizio, data_fine, user_email=user_email)
-                st.success("Spesa ricorrente salvata!")
-                st.rerun()
-            else:
-                st.warning("Inserisci descrizione e importo.")
-
-    df_ric_view = db.carica_spese_ricorrenti(user_email)
-    if not df_ric_view.empty:
-        st.dataframe(style_df_currency(df_ric_view, ["importo"]), use_container_width=True, hide_index=True)
-        if "_success_ric_ts" in st.session_state:
-            if datetime.now().timestamp() - st.session_state["_success_ric_ts"] < 3:
-                st.success("✅ Spesa ricorrente eliminata con successo.")
-                time.sleep(0.5)
-                st.rerun()
-            else:
-                del st.session_state["_success_ric_ts"]
-
-        col_sel_ric, col_btn_ric = st.columns([3, 1], vertical_alignment="bottom")
-        spesa_id = col_sel_ric.selectbox(
-            "Seleziona spesa ricorrente da eliminare",
-            df_ric_view["id"].tolist(),
-            format_func=lambda i: (
-                df_ric_view.loc[df_ric_view["id"] == i, "descrizione"].values[0]
-                if not df_ric_view.loc[df_ric_view["id"] == i, "descrizione"].empty
-                else str(i)
-            ),
-            key="sel_del_ric",
-        )
-        descrizione_sel = df_ric_view.loc[df_ric_view["id"] == spesa_id, "descrizione"].values[0] if spesa_id is not None else ""
-        if col_btn_ric.button("🗑️ Elimina", key="btn_del_ric", use_container_width=True):
-            st.session_state["pending_delete_ric"] = spesa_id
-
-        if st.session_state.get("pending_delete_ric") is not None:
-            sid = st.session_state["pending_delete_ric"]
-            desc = df_ric_view.loc[df_ric_view["id"] == sid, "descrizione"].values[0] if sid is not None else ""
-            st.warning(f"⚠️ Stai per eliminare **{desc}**. Operazione irreversibile.")
-            cc1, cc2 = st.columns(2)
-            if cc1.button("🗑️ Sì, elimina", key="confirm_del_ric", use_container_width=True, type="primary"):
-                db.elimina_spesa_ricorrente(sid, user_email=user_email)
-                db.carica_spese_ricorrenti.clear()
-                del st.session_state["pending_delete_ric"]
-                st.session_state["_success_ric_ts"] = datetime.now().timestamp()
-                st.rerun()
-            if cc2.button("Annulla", key="cancel_del_ric", use_container_width=True):
-                del st.session_state["pending_delete_ric"]
-                st.rerun()
-    else:
-        st.caption("Nessuna spesa ricorrente inserita.")
-
-    st.divider()
-    st.subheader("Nuovo Finanziamento")
-    with st.form("form_finanziamento", clear_on_submit=True):
-        c1, c2 = st.columns(2)
-        nome_fin = c1.text_input("Nome finanziamento")
-        capitale = c2.number_input("Capitale iniziale",min_value=0.0,step=0.1,format="%.2f")
-        c2.caption(f"Valore inserito: **{capitale:.2f} €**")
-        c3, c4 = st.columns(2)
-        taeg = c3.number_input("TAEG (%)", min_value=0.0, step=0.01)
-        durata = c4.number_input("Durata (mesi)", min_value=1, step=1)
-        c5, c6 = st.columns(2)
-        data_inizio = c5.date_input("Data inizio")
-        giorno_scad = c6.number_input("Giorno scadenza", min_value=1, max_value=31, step=1, value=1)
-        rate_pagate_input = st.number_input(
-            "Rate gia pagate ",
-            min_value=0,
-            step=1,
-            value=0,
-            help="Usa questo campo se i movimenti storici non coprono tutte le rate gia saldate.",
-        )
-
-        if st.form_submit_button("SALVA FINANZIAMENTO"):
-            if nome_fin and capitale > 0 and durata > 0:
-                rate_pagate_val = int(rate_pagate_input) if int(rate_pagate_input) > 0 else None
-                db.aggiungi_finanziamento(
-                    nome_fin,
-                    capitale,
-                    taeg,
-                    durata,
-                    data_inizio,
-                    giorno_scad,
-                    rate_pagate=rate_pagate_val, user_email=user_email
-                )
-                st.success("Finanziamento salvato!")
-                st.rerun()
-            else:
-                st.warning("Compila nome, capitale e durata.")
-
-    if not df_fin_db.empty:
-        df_fin_view = df_fin_db.rename(columns={
-            "nome": "Nome",
-            "capitale_iniziale": "Capitale",
-            "taeg": "TAEG %",
-            "durata_mesi": "Durata (mesi)",
-            "data_inizio": "Data inizio",
-            "giorno_scadenza": "Giorno scadenza",
-            "rate_pagate": "Rate pagate (override)",
-        })
-        if "Rate pagate (override)" in df_fin_view.columns:
-            df_fin_view["Rate pagate (override)"] = (
-                pd.to_numeric(df_fin_view["Rate pagate (override)"], errors="coerce")
-                .fillna(0)
-                .astype(int)
+    with st.container(border=True):
+        st.markdown("""
+<div style="display:flex;align-items:center;gap:10px;margin-bottom:18px;">
+  <div style="width:28px;height:28px;border-radius:7px;background:rgba(79,142,240,0.12);
+              display:flex;align-items:center;justify-content:center;font-size:15px;">💳</div>
+  <span style="font-family:'Plus Jakarta Sans',sans-serif;font-size:13px;font-weight:700;
+               color:#dde6f5;letter-spacing:-0.1px;">Nuova Transazione</span>
+</div>""", unsafe_allow_html=True)
+ 
+        # ── Riga 1: Tipo | Categoria | Dettaglio | Data ──
+        col_tipo, col_cat, col_det, col_data = st.columns([1, 1, 1.5, 1])
+ 
+        with col_tipo:
+            tipo_inserito = st.radio(
+                "Tipo movimento",
+                ["↑ Uscita", "↓ Entrata"],
+                horizontal=True,
+                key="reg_tipo_radio",
             )
-
-        sty = df_fin_view.style.format({
-            "Capitale": lambda x: _fmt_num_it(x, 2),
-            "TAEG %": "{:.2f}%",
-        })
-        st.dataframe(sty, use_container_width=True, hide_index=True)
-        if "_success_fin_ts" in st.session_state:
-            if datetime.now().timestamp() - st.session_state["_success_fin_ts"] < 3:
-                st.success("✅ Finanziamento eliminato con successo.")
-                time.sleep(0.5)
-                st.rerun()
+            tipo_val = "USCITA" if "Uscita" in tipo_inserito else "ENTRATA"
+ 
+        # Categoria (fuori dal form per aggiornamento dinamico del Dettaglio)
+        categoria_scelta = col_cat.selectbox(
+            "Categoria",
+            list(log.STRUTTURA_CATEGORIE.keys()),
+            key="reg_categoria",
+        )
+        dettagli_filtrati = log.STRUTTURA_CATEGORIE[categoria_scelta]
+        dettaglio_scelto = col_det.selectbox(
+            "Dettaglio",
+            dettagli_filtrati,
+            key="reg_dettaglio",
+        )
+        data_inserita = col_data.date_input("Data", datetime.now(), key="reg_data")
+ 
+        # ── Riga 2: Importo | Note ──
+        col_imp, col_note = st.columns([1, 3])
+        importo_inserito = col_imp.number_input(
+            "Importo (€)", min_value=0.0, step=0.01, format="%.2f", key="reg_importo"
+        )
+        note_inserite = col_note.text_input(
+            "Note", placeholder="Descrizione opzionale…", key="reg_note"
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+ 
+        # ── Riga 3: Bottoni ──
+        col_btn, col_ann, _ = st.columns([1.2, 0.8, 3])
+ 
+        def _reset_form():
+            for k in ["reg_importo", "reg_note", "reg_data"]:
+                if k in st.session_state:
+                    del st.session_state[k]
+ 
+        if col_btn.button("＋ Registra Movimento", key="btn_registra_mov", use_container_width=True, type="primary"):
+            if not user_email:
+                st.error("Sessione non valida. Effettua di nuovo l'accesso.")
+            elif importo_inserito <= 0:
+                st.warning("Inserisci un importo maggiore di zero.")
             else:
-                del st.session_state["_success_fin_ts"]
-
-        col_sel_fin, col_btn_fin = st.columns([3, 1], vertical_alignment="bottom")
-        fin_nome = col_sel_fin.selectbox(
-            "Seleziona finanziamento da eliminare",
-            df_fin_db["nome"].tolist(),
-            key="sel_del_fin",
-        )
-        if col_btn_fin.button("🗑️ Elimina", key="btn_del_fin", use_container_width=True):
-            st.session_state["pending_delete_fin"] = fin_nome
-
-        if st.session_state.get("pending_delete_fin") is not None:
-            fnome = st.session_state["pending_delete_fin"]
-            st.warning(f"⚠️ Stai per eliminare il finanziamento **{fnome}**. Operazione irreversibile.")
-            cc1, cc2 = st.columns(2)
-            if cc1.button("🗑️ Sì, elimina", key="confirm_del_fin", use_container_width=True, type="primary"):
-                db.elimina_finanziamento(fnome, user_email=user_email)
-                db.carica_finanziamenti.clear()
-                del st.session_state["pending_delete_fin"]
-                st.session_state["_success_fin_ts"] = datetime.now().timestamp()
-                st.rerun()
-            if cc2.button("Annulla", key="cancel_del_fin", use_container_width=True):
-                del st.session_state["pending_delete_fin"]
-                st.rerun()
-
-    st.divider()
-    st.subheader("Backup dati")
-
-    @st.cache_data(ttl=0, show_spinner=False)
-    def _genera_sql_backup(email):
-        """Genera il dump SQL per l'utente corrente al volo."""
-        import psycopg2
-        from config_runtime import get_secret
-
-        db_url = get_secret("DATABASE_URL") or get_secret("DATABASE_URL_POOLER")
-        if not db_url:
-            return None
-
-        tabelle = ["movimenti", "asset_settings", "finanziamenti", "spese_ricorrenti"]
-        try:
-            conn = psycopg2.connect(db_url)
-            cursor = conn.cursor()
-            ora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            blocchi = [
-                f"-- Personal Budget — Backup dati",
-                f"-- Utente: {email}",
-                f"-- Data  : {ora}",
-                "SET client_encoding = 'UTF8';",
-            ]
-            for tabella in tabelle:
-                blocchi.append(f"\n-- Tabella: {tabella}")
+                # Cattura i valori PRIMA del rerun
+                _cat = st.session_state.get("reg_categoria", categoria_scelta)
+                _det = st.session_state.get("reg_dettaglio", dettaglio_scelto)
                 try:
-                    cursor.execute(
-                        f"SELECT * FROM {tabella} WHERE user_email = %s",
-                        (email,)
+                    db.aggiungi_movimento(
+                        data_inserita, tipo_val, _cat,
+                        _det, importo_inserito, note_inserite,
+                        user_email=user_email,
                     )
-                    righe = cursor.fetchall()
-                    colonne = [desc[0] for desc in cursor.description]
-                    for riga in righe:
-                        valori = []
-                        for v in riga:
-                            if v is None:
-                                valori.append("NULL")
-                            elif isinstance(v, bool):
-                                valori.append("TRUE" if v else "FALSE")
-                            elif isinstance(v, (int, float)):
-                                valori.append(str(v))
-                            else:
-                                valori.append(f"'{str(v).replace(chr(39), chr(39)*2)}'")
-                        blocchi.append(
-                            f"INSERT INTO {tabella} ({', '.join(colonne)}) "
-                            f"VALUES ({', '.join(valori)});"
-                        )
                 except Exception as exc:
-                    blocchi.append(f"-- ERRORE {tabella}: {exc}")
-            cursor.close()
-            conn.close()
-            return "\n".join(blocchi)
-        except Exception as exc:
-            return None
+                    st.error(f"Errore salvataggio movimento: {exc}")
+                else:
+                    db.carica_dati.clear()
+                    st.session_state["_banner_mov"] = True
+                    _reset_form()
+                    st.rerun()
+ 
+        if col_ann.button("Annulla", key="btn_annulla_mov", use_container_width=True):
+            _reset_form()
+            st.rerun()
+ 
+    # ── SPESE RICORRENTI ──
+    with st.container(border=True):
+        # conteggio badge
+        df_ric_count = db.carica_spese_ricorrenti(user_email)
+        n_ric = len(df_ric_count) if not df_ric_count.empty else 0
+        st.markdown(f"""
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+  <div style="display:flex;align-items:center;gap:10px;">
+    <div style="width:28px;height:28px;border-radius:7px;background:rgba(79,142,240,0.12);
+                display:flex;align-items:center;justify-content:center;font-size:15px;">🔁</div>
+    <span style="font-family:'Plus Jakarta Sans',sans-serif;font-size:13px;font-weight:700;
+                 color:#dde6f5;letter-spacing:-0.1px;">Spese Ricorrenti</span>
+  </div>
+  <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:400;
+               padding:3px 10px;border-radius:20px;background:rgba(79,142,240,0.12);
+               color:#82b4f7;border:1px solid rgba(79,142,240,0.28);">{n_ric} attive</span>
+</div>""", unsafe_allow_html=True)
+ 
+        with st.form("form_spese_ricorrenti", clear_on_submit=False):
+            c_desc, c_imp, c_freq = st.columns([2, 1, 1])
+            descrizione = c_desc.text_input("Descrizione spesa", placeholder="Es. Netflix, Palestra, Assicurazione…", key="ric_desc")
+            importo = c_imp.number_input("Importo (€)", min_value=0.0, step=0.01, key="ric_importo")
+            freq_options = {
+                "Mensile": 1, "Bimestrale": 2, "Trimestrale": 3,
+                "Quadrimestrale": 4, "Semestrale": 6, "Annuale": 12,
+            }
+            freq_label = c_freq.selectbox("Frequenza", list(freq_options.keys()), index=0, key="ric_freq")
+            freq = freq_options[freq_label]
 
-    sql_backup = _genera_sql_backup(user_email)
-    if sql_backup:
-        data_oggi = datetime.now().strftime("%Y-%m-%d")
-        st.caption(
-            "Scarica una copia completa dei tuoi dati in formato SQL. "
-            "Conservala in un posto sicuro — è accessibile anche senza l'app."
-        )
-        st.download_button(
-            label="⬇️ Scarica backup dati",
-            data=sql_backup.encode("utf-8"),
-            file_name=f"personal_budget_backup_{data_oggi}.sql",
-            mime="text/plain",
-            use_container_width=False,
-        )
-    else:
-        st.caption("Impossibile generare il backup al momento.")
+            c_giorno, c_start, c_end, c_check = st.columns([1, 1, 1, 1])
+            giorno_scad = c_giorno.number_input("Giorno scadenza", min_value=1, max_value=31, step=1, value=1, key="ric_giorno")
+            data_inizio = c_start.date_input("Data inizio", datetime.now(), key="ric_data_inizio")
+            senza_fine = c_check.checkbox("Senza data fine", value=False, key="ric_senza_fine")
+            data_fine = None if senza_fine else c_end.date_input("Data fine", datetime.now(), key="ric_data_fine")
 
+            if st.form_submit_button("＋ Aggiungi Ricorrente", use_container_width=False):
+                if descrizione and importo > 0:
+                    try:
+                        db.aggiungi_spesa_ricorrente(descrizione, importo, giorno_scad, freq, data_inizio, data_fine, user_email=user_email)
+                        db.carica_spese_ricorrenti.clear()
+                        # reset manuale campi chiave
+                        for _k in ["ric_desc", "ric_importo", "ric_giorno"]:
+                            st.session_state.pop(_k, None)
+                        st.session_state["_banner_ric"] = True
+                        st.rerun()
+                    except Exception as _exc:
+                        st.error(f"Errore salvataggio: {_exc}")
+                else:
+                    st.warning("Inserisci descrizione e importo maggiore di zero.")
+ 
+        # Banner conferma salvataggio (mostrato nel ciclo dopo il rerun)
+        if st.session_state.pop("_banner_ric", False):
+            st.success("✅ Spesa ricorrente salvata con successo!")
 
-    st.divider()
-    st.subheader("Storico Movimenti")
+        # Tabella ricorrenti
+        df_ric_view = db.carica_spese_ricorrenti(user_email)
+        if not df_ric_view.empty:
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-    # Filtri registro
-    c_f1, c_f2, c_f3 = st.columns([1, 1, 2])
-    mese_reg = c_f1.selectbox("Mese registro", list(MONTH_NAMES.keys()), index=mese_sel - 1, format_func=lambda x: MONTH_NAMES[x])
-    anno_reg = c_f2.selectbox("Anno registro", anni_disponibili, index=anni_disponibili.index(anno_sel) if anno_sel in anni_disponibili else 0)
-    mostra_tutto = c_f3.checkbox("Mostra tutte le transazioni", value=False)
+            # ── Header tabella ──
+            tot_mensile = df_ric_view["importo"].sum()
+            FREQ_MAP = {1:"Mensile",2:"Bimestrale",3:"Trimestrale",4:"Quadrimestrale",6:"Semestrale",12:"Annuale"}
+            FREQ_STYLE = {
+                "Mensile":   ("#82b4f7", "rgba(79,142,240,0.10)",  "rgba(79,142,240,0.28)"),
+                "Annuale":   ("#f5a623", "rgba(245,166,35,0.10)",   "rgba(245,166,35,0.25)"),
+                "Semestrale":("#9b74f5", "rgba(155,116,245,0.10)",  "rgba(155,116,245,0.25)"),
+            }
+            ric_rows_html = []
+            for _, row in df_ric_view.iterrows():
+                freq_n = int(row.get("frequenza_mesi", 1))
+                freq_lbl = FREQ_MAP.get(freq_n, f"{freq_n}m")
+                fc, fbg, fbd = FREQ_STYLE.get(freq_lbl, ("#82b4f7","rgba(79,142,240,0.10)","rgba(79,142,240,0.28)"))
+                fine_val = row.get("data_fine")
+                fine_str = str(fine_val)[:10] if (fine_val and str(fine_val) not in ["None","NaT",""]) else "—"
+                importo_it = format_eur(float(row.get("importo", 0)), decimals=2)
+                desc_txt = str(row["descrizione"])
+                ric_rows_html.append(
+                    _reg_table_row([
+                        _reg_table_td(escape(str(row["id"])),   color="#5a6f8c", mono=True),
+                        _reg_table_td(escape(desc_txt),         color="#dde6f5", weight=500, title=desc_txt),
+                        _reg_table_td(importo_it,               color="#f26a6a", mono=True, weight=600),
+                        _reg_table_td(_chip(freq_lbl, fc, fbg, fbd), nowrap=False),
+                        _reg_table_td(str(int(row.get("giorno_scadenza", 0))), color="#5a6f8c", mono=True, align="center"),
+                        _reg_table_td(str(row.get("data_inizio",""))[:10],     color="#5a6f8c", mono=True, align="center"),
+                        _reg_table_td(fine_str,                                color="#5a6f8c", mono=True, align="center"),
+                    ])
+                )
 
-    df_reg = df_mov.copy()
-    if not mostra_tutto:
-        df_reg = df_reg[(df_reg["Data"].dt.month == mese_reg) & (df_reg["Data"].dt.year == anno_reg)]
+            st.markdown(
+                _render_reg_scroll_table(
+                    title="Elenco ricorrenti registrate",
+                    right_html=f"{format_eur(tot_mensile, decimals=2)} / mese",
+                    columns=[
+                        ("#",           "left"),
+                        ("Descrizione", "left"),
+                        ("Importo",     "left"),
+                        ("Frequenza",   "left"),
+                        ("Scad.",       "center"),
+                        ("Inizio",      "center"),
+                        ("Fine",        "center"),
+                    ],
+                    widths=[0.45, 2.6, 1.1, 1.25, 0.7, 1.1, 0.9],
+                    rows_html=ric_rows_html,
+                    height_px=320,
+                ),
+                unsafe_allow_html=True,
+            )
+            st.caption("Per eliminare una riga, selezionala qui sotto e clicca su Elimina.")
 
-    c_f4, c_f5, c_f6 = st.columns([1, 1, 2])
-    tipo_filter = c_f4.multiselect("Tipo", ["USCITA", "ENTRATA"], default=["USCITA", "ENTRATA"])
-    categoria_filter = c_f5.multiselect("Categoria", sorted(df_reg["Categoria"].dropna().unique()))
-    testo_filter = c_f6.text_input("Cerca in Dettaglio/Note")
+            def _label_ric(sid):
+                rows = df_ric_view[df_ric_view["id"] == sid]
+                if rows.empty:
+                    return str(sid)
+                r = rows.iloc[0]
+                return f"{r['descrizione']} | {format_eur(r['importo'], decimals=2)} | scad. {int(r.get('giorno_scadenza', 0))}"
 
-    if tipo_filter:
-        df_reg = df_reg[df_reg["Tipo"].isin(tipo_filter)]
-    if categoria_filter:
-        df_reg = df_reg[df_reg["Categoria"].isin(categoria_filter)]
-    if testo_filter:
-        t = testo_filter.lower()
-        df_reg = df_reg[
-            df_reg["Dettaglio"].astype(str).str.lower().str.contains(t, na=False) |
-            df_reg["Note"].astype(str).str.lower().str.contains(t, na=False)
-        ]
+            col_sel_ric, col_btn_ric = st.columns([4, 1], vertical_alignment="bottom")
+            ric_id = col_sel_ric.selectbox(
+                "Seleziona ricorrente da eliminare",
+                df_ric_view["id"].tolist(),
+                format_func=_label_ric,
+                key="sel_del_ric",
+            )
+            if col_btn_ric.button("🗑️ Elimina", key="btn_del_ric", use_container_width=True):
+                st.session_state["pending_delete_ric"] = ric_id
 
-    if "Id" in df_reg.columns:
-        df_reg = df_reg.sort_values(by=["Data", "Id"], ascending=[False, False])
-    else:
-        df_reg = df_reg.sort_values(by="Data", ascending=False)
-    st.dataframe(style_df_currency(df_reg, ["Importo"]), use_container_width=True, height=280)
+            if "_success_ric_ts" in st.session_state:
+                if datetime.now().timestamp() - st.session_state["_success_ric_ts"] < 3:
+                    st.success("✅ Spesa ricorrente eliminata.")
+                    time.sleep(0.3)
+                    st.rerun()
+                else:
+                    del st.session_state["_success_ric_ts"]
 
-    if not df_reg.empty:
+            if st.session_state.get("pending_delete_ric") is not None:
+                sid = st.session_state["pending_delete_ric"]
+                desc = df_ric_view.loc[df_ric_view["id"] == sid, "descrizione"].values[0] if sid is not None else ""
+                st.warning(f"⚠️ Elimina **{desc}**? Operazione irreversibile.")
+                cc1, cc2 = st.columns(2)
+                if cc1.button("🗑️ Sì, elimina", key="confirm_del_ric", use_container_width=True, type="primary"):
+                    db.elimina_spesa_ricorrente(sid, user_email=user_email)
+                    db.carica_spese_ricorrenti.clear()
+                    del st.session_state["pending_delete_ric"]
+                    st.session_state["_success_ric_ts"] = datetime.now().timestamp()
+                    st.rerun()
+                if cc2.button("Annulla", key="cancel_del_ric", use_container_width=True):
+                    del st.session_state["pending_delete_ric"]
+                    st.rerun()
+        else:
+            st.caption("Nessuna spesa ricorrente inserita.")
+ 
+    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+ 
+    # ── NUOVO FINANZIAMENTO ──
+    with st.container(border=True):
+        n_fin = len(df_fin_db) if not df_fin_db.empty else 0
+        st.markdown(f"""
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+  <div style="display:flex;align-items:center;gap:10px;">
+    <div style="width:28px;height:28px;border-radius:7px;background:rgba(79,142,240,0.12);
+                display:flex;align-items:center;justify-content:center;font-size:15px;">🏦</div>
+    <span style="font-family:'Plus Jakarta Sans',sans-serif;font-size:13px;font-weight:700;
+                 color:#dde6f5;letter-spacing:-0.1px;">Nuovo Finanziamento</span>
+  </div>
+  <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:400;
+               padding:3px 10px;border-radius:20px;background:rgba(79,142,240,0.12);
+               color:#82b4f7;border:1px solid rgba(79,142,240,0.28);">{n_fin} attivi</span>
+</div>""", unsafe_allow_html=True)
+ 
+        with st.form("form_finanziamento", clear_on_submit=False):
+            c1, c2, c3 = st.columns(3)
+            nome_fin = c1.text_input("Nome finanziamento", placeholder="Es. Mutuo Casa, Prestito Auto…", key="fin_nome")
+            capitale = c2.number_input("Capitale iniziale (€)", min_value=0.0, step=0.1, format="%.2f", key="fin_capitale")
+            taeg = c3.number_input("TAEG (%)", min_value=0.0, step=0.01, key="fin_taeg")
+            c4, c5, c6, c7 = st.columns(4)
+            durata = c4.number_input("Durata (mesi)", min_value=1, step=1, key="fin_durata")
+            data_inizio_fin = c5.date_input("Data inizio", key="fin_data_inizio")
+            giorno_scad_fin = c6.number_input("Giorno scadenza", min_value=1, max_value=31, step=1, value=1, key="fin_giorno")
+            rate_pagate_input = c7.number_input(
+                "Rate già pagate", min_value=0, step=1, value=0, key="fin_rate",
+                help="Usa questo campo se i movimenti storici non coprono tutte le rate già saldate.",
+            )
+            if st.form_submit_button("💾 Salva Finanziamento", use_container_width=False):
+                if nome_fin and capitale > 0 and durata > 0:
+                    try:
+                        rate_pagate_val = int(rate_pagate_input) if int(rate_pagate_input) > 0 else None
+                        db.aggiungi_finanziamento(
+                            nome_fin, capitale, taeg, durata, data_inizio_fin,
+                            giorno_scad_fin, rate_pagate=rate_pagate_val, user_email=user_email,
+                        )
+                        db.carica_finanziamenti.clear()
+                        for k in ["fin_nome", "fin_capitale", "fin_taeg", "fin_durata", "fin_rate", "fin_giorno"]:
+                            if k in st.session_state:
+                                del st.session_state[k]
+                        st.success("✅ Finanziamento salvato!")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Errore salvataggio: {exc}")
+                else:
+                    st.warning("Compila nome, capitale e durata.")
+ 
+        if not df_fin_db.empty:
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+            # Header tabella finanziamenti
+            fin_rows_html = []
+            for _, f in df_fin_db.iterrows():
+                dati_b = log.calcolo_finanziamento(
+                    f["capitale_iniziale"], f["taeg"],
+                    f["durata_mesi"], f["data_inizio"], f["giorno_scadenza"],
+                )
+                rate_db  = int(f["rate_pagate"]) if "rate_pagate" in f.index and pd.notna(f["rate_pagate"]) else None
+                rate_mov = _mesi_pagati_da_mov(df_mov, f["nome"], dati_b["rata"], data_inizio=f["data_inizio"])
+                rate_cal = int(dati_b.get("mesi_pagati", 0))
+                vals_r   = [v for v in [rate_db, rate_mov, rate_cal] if v is not None]
+                rate_eff = max(vals_r) if vals_r else None
+                dati     = log.calcolo_finanziamento(
+                    f["capitale_iniziale"], f["taeg"],
+                    f["durata_mesi"], f["data_inizio"], f["giorno_scadenza"],
+                    rate_pagate_override=rate_eff,
+                )
+                taeg_pct = f["taeg"]
+                taeg_c  = "#f5a623" if taeg_pct > 5 else "#10d98a"
+                taeg_bg = "rgba(245,166,35,0.10)" if taeg_pct > 5 else "rgba(16,217,138,0.10)"
+                taeg_bd = "rgba(245,166,35,0.26)" if taeg_pct > 5 else "rgba(16,217,138,0.26)"
+                nome_txt = str(f["nome"])
+                fin_rows_html.append(
+                    _reg_table_row([
+                        _reg_table_td(f"<strong>{escape(nome_txt)}</strong>", color="#dde6f5", weight=600, title=nome_txt),
+                        _reg_table_td(format_eur(f["capitale_iniziale"], 0), color="#dde6f5", mono=True),
+                        _reg_table_td(_chip(f"{taeg_pct:.2f}%", taeg_c, taeg_bg, taeg_bd), nowrap=False),
+                        _reg_table_td(f"{int(f['durata_mesi'])}m",             color="#5a6f8c", mono=True, align="center"),
+                        _reg_table_td(str(f["data_inizio"])[:10],              color="#5a6f8c", mono=True, align="center"),
+                        _reg_table_td(str(int(f["giorno_scadenza"])),          color="#5a6f8c", mono=True, align="center"),
+                        _reg_table_td(format_eur(dati["rata"], 2),             color="#f26a6a", mono=True, weight=600),
+                        _reg_table_td(str(rate_eff or 0),                      color="#5a6f8c", mono=True, align="center"),
+                    ])
+                )
+
+            # Totale rate mensili
+            try:
+                totale_rate = sum(
+                    log.calcolo_finanziamento(
+                        r["capitale_iniziale"], r["taeg"], r["durata_mesi"],
+                        r["data_inizio"], r["giorno_scadenza"]
+                    )["rata"]
+                    for _, r in df_fin_db.iterrows()
+                )
+                right_fin = f"{format_eur(totale_rate, 2)} / mese"
+            except Exception:
+                right_fin = ""
+
+            st.markdown(
+                _render_reg_scroll_table(
+                    title="Finanziamenti in corso",
+                    right_html=right_fin,
+                    columns=[
+                        ("Nome",       "left"),
+                        ("Capitale",   "left"),
+                        ("TAEG",       "left"),
+                        ("Durata",     "center"),
+                        ("Inizio",     "center"),
+                        ("Scad.",      "center"),
+                        ("Rata stim.", "left"),
+                        ("Rate pag.",  "center"),
+                    ],
+                    widths=[1.8, 1.2, 0.9, 0.8, 1.1, 0.7, 1.1, 0.9],
+                    rows_html=fin_rows_html,
+                    height_px=280,
+                ),
+                unsafe_allow_html=True,
+            )
+            st.caption("Per eliminare una riga, selezionala qui sotto.")
+
+            def _label_fin(nome):
+                rows = df_fin_db[df_fin_db["nome"] == nome]
+                if rows.empty:
+                    return str(nome)
+                r = rows.iloc[0]
+                return f"{r['nome']} | {format_eur(r['capitale_iniziale'], 0)} | {int(r['durata_mesi'])} mesi"
+
+            col_sel_fin, col_btn_fin = st.columns([4, 1], vertical_alignment="bottom")
+            fin_nome = col_sel_fin.selectbox(
+                "Seleziona finanziamento da eliminare",
+                df_fin_db["nome"].tolist(),
+                format_func=_label_fin,
+                key="sel_del_fin",
+            )
+            if col_btn_fin.button("🗑️ Elimina", key="btn_del_fin", use_container_width=True):
+                st.session_state["pending_delete_fin"] = fin_nome
+
+            if "_success_fin_ts" in st.session_state:
+                if datetime.now().timestamp() - st.session_state["_success_fin_ts"] < 3:
+                    st.success("✅ Finanziamento eliminato.")
+                    time.sleep(0.3)
+                    st.rerun()
+                else:
+                    del st.session_state["_success_fin_ts"]
+
+            if st.session_state.get("pending_delete_fin") is not None:
+                fnome = st.session_state["pending_delete_fin"]
+                st.warning(f"⚠️ Elimina finanziamento **{fnome}**? Operazione irreversibile.")
+                cc1, cc2 = st.columns(2)
+                if cc1.button("🗑️ Sì, elimina", key="confirm_del_fin", use_container_width=True, type="primary"):
+                    db.elimina_finanziamento(fnome, user_email=user_email)
+                    db.carica_finanziamenti.clear()
+                    del st.session_state["pending_delete_fin"]
+                    st.session_state["_success_fin_ts"] = datetime.now().timestamp()
+                    st.rerun()
+                if cc2.button("Annulla", key="cancel_del_fin", use_container_width=True):
+                    del st.session_state["pending_delete_fin"]
+                    st.rerun()
+ 
+    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+ 
+    # ── STORICO MOVIMENTI ── 
+    with st.container(border=True):
+        st.markdown("""
+<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+  <div style="width:28px;height:28px;border-radius:7px;background:rgba(79,142,240,0.12);
+              display:flex;align-items:center;justify-content:center;font-size:15px;">📜</div>
+  <span style="font-family:'Plus Jakarta Sans',sans-serif;font-size:13px;font-weight:700;
+               color:#dde6f5;letter-spacing:-0.1px;">Storico Movimenti</span>
+</div>""", unsafe_allow_html=True)
+        
+        c_f1, c_f2, c_f3 = st.columns([1, 1, 2])
+        mese_reg = c_f1.selectbox("Mese", list(MONTH_NAMES.keys()), index=mese_sel - 1, format_func=lambda x: MONTH_NAMES[x])
+        anno_reg = c_f2.selectbox("Anno", anni_disponibili, index=anni_disponibili.index(anno_sel) if anno_sel in anni_disponibili else 0)
+        mostra_tutto = c_f3.checkbox("Mostra tutte le transazioni", value=False)
+ 
+        df_reg = df_mov.copy()
+        if not mostra_tutto:
+            df_reg = df_reg[(df_reg["Data"].dt.month == mese_reg) & (df_reg["Data"].dt.year == anno_reg)]
+ 
+        c_f4, c_f5, c_f6 = st.columns([1, 1, 2])
+        with c_f4:
+            tipo_radio = st.radio(
+                "Tipo",
+                ["Tutte", "↑ Uscita", "↓ Entrata"],
+                horizontal=True,
+                key="storico_tipo_radio",
+            )
+            if tipo_radio == "↑ Uscita":
+                tipo_filter = ["USCITA"]
+            elif tipo_radio == "↓ Entrata":
+                tipo_filter = ["ENTRATA"]
+            else:
+                tipo_filter = ["USCITA", "ENTRATA"]
+        categoria_filter = c_f5.multiselect("Categoria", sorted(df_reg["Categoria"].dropna().unique()))
+        testo_filter = c_f6.text_input("Cerca in Dettaglio / Note", placeholder="Cerca…")
+        st.markdown('</div>', unsafe_allow_html=True)
+ 
+        if tipo_filter:
+            df_reg = df_reg[df_reg["Tipo"].isin(tipo_filter)]
+        if categoria_filter:
+            df_reg = df_reg[df_reg["Categoria"].isin(categoria_filter)]
+        if testo_filter:
+            t = testo_filter.lower()
+            df_reg = df_reg[
+                df_reg["Dettaglio"].astype(str).str.lower().str.contains(t, na=False) |
+                df_reg["Note"].astype(str).str.lower().str.contains(t, na=False)
+            ]
+
+        if "Id" in df_reg.columns:
+            df_reg = df_reg.sort_values(by=["Data", "Id"], ascending=[False, False])
+        else:
+            df_reg = df_reg.sort_values(by="Data", ascending=False)
+
         def _label_mov(i):
+            if "Id" not in df_reg.columns:
+                return str(i)
             rows = df_reg[df_reg["Id"] == i]
             if rows.empty:
                 return str(i)
             r = rows.iloc[0]
-            data_txt = r["Data"].strftime("%d/%m/%Y %H:%M") if pd.notna(r["Data"]) else ""
-            return f"{i} | {data_txt} | {r['Tipo']} | {r['Dettaglio']} | {eur2(r['Importo'])}"
+            data_txt = r["Data"].strftime("%d/%m/%Y") if pd.notna(r["Data"]) else ""
+            dettaglio_txt = str(r.get("Dettaglio", "") or "").strip()
+            return f"{i} | {data_txt} | {r['Tipo']} | {dettaglio_txt} | {eur2(r['Importo'])}"
+
+        if not df_reg.empty:
+            totale_mov = len(df_reg)
+            uscite_tot = df_reg[df_reg["Tipo"] == "USCITA"]["Importo"].sum()
+            mov_rows_html = []
+            for _, row in df_reg.iterrows():
+                row_id = row["Id"] if "Id" in row.index else _
+                data_txt = row["Data"].strftime("%d/%m/%Y") if pd.notna(row.get("Data")) else "—"
+                categoria_txt = str(row.get("Categoria", "") or "—")
+                dettaglio_txt = str(row.get("Dettaglio", "") or "—")
+                note_raw = str(row.get("Note", "") or "").strip()
+                note_txt = note_raw if note_raw else "—"
+                importo_color = "#10d98a" if str(row.get("Tipo", "")).upper() == "ENTRATA" else "#f26a6a"
+                mov_rows_html.append(
+                    _reg_table_row([
+                        _reg_table_td(escape(str(row_id)),            color="#5a6f8c", mono=True),
+                        _reg_table_td(data_txt,                       color="#5a6f8c", mono=True),
+                        _reg_table_td(_tipo_chip(row.get("Tipo")),    nowrap=False),
+                        _reg_table_td(escape(categoria_txt),          color="#5a6f8c", title=categoria_txt),
+                        _reg_table_td(f"<strong>{escape(dettaglio_txt)}</strong>", color="#dde6f5", weight=600, title=dettaglio_txt),
+                        _reg_table_td(format_eur(row.get("Importo", 0), 2), color=importo_color, mono=True, weight=600),
+                        _reg_table_td(escape(note_txt),               color="#5a6f8c", title=note_txt),
+                    ])
+                )
+
+            st.markdown(
+                _render_reg_scroll_table(
+                    title="Storico movimenti",
+                    right_html=f"{totale_mov} righe",
+                    columns=[
+                        ("ID",         "left"),
+                        ("Data",       "left"),
+                        ("Tipo",       "left"),
+                        ("Categoria",  "left"),
+                        ("Dettaglio",  "left"),
+                        ("Importo",    "left"),
+                        ("Note",       "left"),
+                    ],
+                    widths=[0.45, 0.9, 0.9, 1.0, 1.7, 0.95, 1.3],
+                    rows_html=mov_rows_html,
+                    height_px=420,
+                ),
+                unsafe_allow_html=True,
+            )
+            st.caption("Per eliminare una riga, selezionala qui sotto.")
+
+            col_sel_mov, col_btn_mov = st.columns([4, 1], vertical_alignment="bottom")
+            mov_id = col_sel_mov.selectbox(
+                "Seleziona movimento da eliminare",
+                df_reg["Id"].tolist(),
+                format_func=_label_mov,
+                key="sel_del_mov",
+            )
+            if col_btn_mov.button("🗑️ Elimina", key="btn_del_mov", use_container_width=True):
+                st.session_state["pending_delete_mov"] = mov_id
+        else:
+            st.markdown(
+                _render_reg_scroll_table(
+                    title="Storico movimenti",
+                    right_html="0 righe",
+                    columns=[
+                        ("ID",        "left"),
+                        ("Data",      "left"),
+                        ("Tipo",      "left"),
+                        ("Categoria", "left"),
+                        ("Dettaglio", "left"),
+                        ("Importo",   "left"),
+                        ("Note",      "left"),
+                    ],
+                    widths=[0.45, 0.9, 0.9, 1.0, 1.7, 0.95, 1.3],
+                    rows_html=[],
+                    height_px=160,
+                    empty_message="Nessun movimento trovato con i filtri selezionati.",
+                ),
+                unsafe_allow_html=True,
+            )
 
         if "_success_mov_ts" in st.session_state:
             if datetime.now().timestamp() - st.session_state["_success_mov_ts"] < 3:
@@ -2717,16 +3811,6 @@ with tab_admin:
                 st.rerun()
             else:
                 del st.session_state["_success_mov_ts"]
-
-        col_sel_mov, col_btn_mov = st.columns([4, 1], vertical_alignment="bottom")
-        mov_id = col_sel_mov.selectbox(
-            "Seleziona movimento da eliminare",
-            df_reg["Id"].tolist(),
-            format_func=_label_mov,
-            key="sel_del_mov",
-        )
-        if col_btn_mov.button("🗑️ Elimina", key="btn_del_mov", use_container_width=True):
-            st.session_state["pending_delete_mov"] = mov_id
 
         if st.session_state.get("pending_delete_mov") is not None:
             mid = st.session_state["pending_delete_mov"]
@@ -2741,3 +3825,82 @@ with tab_admin:
             if cc2.button("Annulla", key="cancel_del_mov", use_container_width=True):
                 del st.session_state["pending_delete_mov"]
                 st.rerun()
+ 
+    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+ 
+    # ── BACKUP DATI ──
+    with st.container(border=True):
+        st.markdown("""
+<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+  <div style="width:50px;height:28px;border-radius:7px;background:rgba(79,142,240,0.12);
+              display:flex;align-items:center;justify-content:center;font-size:15px;">🗄️</div>
+  <span style="font-family:'Plus Jakarta Sans',sans-serif;font-size:19px;font-weight:700;
+               color:#dde6f5;letter-spacing:-0.1px;">Backup Dati</span>
+</div>""", unsafe_allow_html=True)
+ 
+        @st.cache_data(ttl=0, show_spinner=False)
+        def _genera_sql_backup(email):
+            import psycopg2
+            from config_runtime import get_secret
+            db_url = get_secret("DATABASE_URL") or get_secret("DATABASE_URL_POOLER")
+            if not db_url:
+                return None
+            tabelle = ["movimenti", "asset_settings", "finanziamenti", "spese_ricorrenti"]
+            try:
+                conn = psycopg2.connect(db_url)
+                cursor = conn.cursor()
+                ora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                blocchi = [
+                    f"-- Personal Budget — Backup dati",
+                    f"-- Utente: {email}",
+                    f"-- Data  : {ora}",
+                    "SET client_encoding = 'UTF8';",
+                ]
+                for tabella in tabelle:
+                    blocchi.append(f"\n-- Tabella: {tabella}")
+                    try:
+                        cursor.execute(f"SELECT * FROM {tabella} WHERE user_email = %s", (email,))
+                        righe = cursor.fetchall()
+                        colonne = [desc[0] for desc in cursor.description]
+                        for riga in righe:
+                            valori = []
+                            for v in riga:
+                                if v is None:
+                                    valori.append("NULL")
+                                elif isinstance(v, bool):
+                                    valori.append("TRUE" if v else "FALSE")
+                                elif isinstance(v, (int, float)):
+                                    valori.append(str(v))
+                                else:
+                                    valori.append(f"'{str(v).replace(chr(39), chr(39)*2)}'")
+                            blocchi.append(
+                                f"INSERT INTO {tabella} ({', '.join(colonne)}) "
+                                f"VALUES ({', '.join(valori)});"
+                            )
+                    except Exception as exc:
+                        blocchi.append(f"-- ERRORE {tabella}: {exc}")
+                cursor.close()
+                conn.close()
+                return "\n".join(blocchi)
+            except Exception:
+                return None
+ 
+        sql_backup = _genera_sql_backup(user_email)
+        col_txt, col_btn = st.columns([3, 1], vertical_alignment="bottom")
+        col_txt.markdown(
+            "<div style='font-size:0.90rem;color:#5a6f8c;line-height:1.7;'>"
+            "<p style='margin-bottom:4px;'>Scarica una <strong style='color:#dde6f5;'>copia completa</strong> dei tuoi dati in formato SQL.</p>"
+            "<p style='margin:0;'>Conservala in un posto sicuro — accessibile anche senza l'app.</p></div>",
+            unsafe_allow_html=True,
+        )
+        if sql_backup:
+            data_oggi = datetime.now().strftime("%Y-%m-%d")
+            col_btn.download_button(
+                label="⬇ Scarica backup",
+                data=sql_backup.encode("utf-8"),
+                file_name=f"personal_budget_backup_{data_oggi}.sql",
+                mime="text/plain",
+                use_container_width=True,
+            )
+        else:
+            col_btn.caption("Backup non disponibile.")
