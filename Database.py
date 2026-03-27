@@ -300,14 +300,14 @@ def elimina_spesa_ricorrente(spesa_id, user_email):
 
 # --- FUNZIONI DI LETTURA ---
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60, show_spinner=False)
 def carica_dati(user_email):
     with connetti_db() as conn:
         query = "SELECT * FROM movimenti WHERE user_email = %s ORDER BY data DESC, id DESC"
         df = pd.read_sql_query(query, conn, params=(user_email,))
     return df
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60, show_spinner=False)
 def carica_spese_ricorrenti(user_email):
     with connetti_db() as conn:
         try:
@@ -317,7 +317,7 @@ def carica_spese_ricorrenti(user_email):
             df = pd.DataFrame()
     return df
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60, show_spinner=False)
 def carica_finanziamenti(user_email):
     with connetti_db() as conn:
         query = "SELECT * FROM finanziamenti WHERE user_email = %s"
