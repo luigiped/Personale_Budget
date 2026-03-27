@@ -1,12 +1,19 @@
+import functools
+import threading
+import time
 import pandas as pd
 import numpy as np
-import streamlit as st
 from datetime import date, datetime
 import numpy_financial as npf
 from dateutil.relativedelta import relativedelta
 import yfinance as yf
 import calendar
 import math
+
+# Cache TTL semplice per prezzo ETF (evita chiamate Yahoo Finance ripetute)
+_etf_cache: dict[str, tuple[float, float | None]] = {}
+_etf_cache_lock = threading.Lock()
+_ETF_CACHE_TTL = 60  # secondi
 
 # Standardizzazione valori tipo movimento
 TIPO_ENTRATA = "ENTRATA"
@@ -822,26 +829,41 @@ def previsione_saldo(df_transazioni, anno, saldo_iniziale=0.0, mese_riferimento=
     return pd.DataFrame() # Ritorna vuoto se non ci sono abbastanza dati
 
 # logica proiezione andamento PAC
-@st.cache_data(ttl=60)
 def prezzo_attuale_ETF(ticker):
     """
     Recupera l'ultimo prezzo di chiusura disponibile per un dato ticker.
     Esempio ticker: 'V80A.DE' (Vanguard LifeStrategy 80) o 'VWCE.MI'
+
+    Il risultato è cached in memoria per _ETF_CACHE_TTL secondi per evitare
+    chiamate ripetute a Yahoo Finance durante lo stesso render.
     """
+    ticker_clean = str(ticker).strip()
+
+    with _etf_cache_lock:
+        entry = _etf_cache.get(ticker_clean)
+        if entry is not None:
+            ts, value = entry
+            if time.monotonic() - ts < _ETF_CACHE_TTL:
+                return value
+
+    result = None
     try:
-        ticker = str(ticker).strip()
-        tickers = [ticker]
-        if "." not in ticker:
-            tickers.extend([f"{ticker}.MI", f"{ticker}.DE", f"{ticker}.AS"])
+        tickers = [ticker_clean]
+        if "." not in ticker_clean:
+            tickers.extend([f"{ticker_clean}.MI", f"{ticker_clean}.DE", f"{ticker_clean}.AS"])
         for t in tickers:
             azione = yf.Ticker(t)
             data = azione.history(period="1d")
             if not data.empty:
-                prezzo = data["Close"].iloc[-1]
-                return round(float(prezzo), 2)
-    except Exception as e:
-        print(f"Errore nel recupero del prezzo per {ticker}: {e}")
-        return None
+                result = round(float(data["Close"].iloc[-1]), 2)
+                break
+    except Exception as exc:
+        print(f"Errore nel recupero del prezzo per {ticker_clean}: {exc}")
+
+    with _etf_cache_lock:
+        _etf_cache[ticker_clean] = (time.monotonic(), result)
+
+    return result
 
 def versamenti_pac_da_registro(df_transazioni, anno_corrente=None):
     """
