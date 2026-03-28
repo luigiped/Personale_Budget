@@ -1,0 +1,1 @@
+"""utils — moduli condivisi framework-agnostic."""
