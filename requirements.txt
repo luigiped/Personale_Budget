@@ -1,14 +1,31 @@
-google-auth
-google-auth-oauthlib
-numpy
-numpy-financial
-pandas
-plotly
-psycopg2-binary
-python-dateutil
-streamlit
-streamlit-oauth
-yfinance
-extra-streamlit-components
-google-cloud-secret-manager
-google-api-python-client
+# Personal Budget Dashboard — dipendenze NiceGUI
+
+# ── Core framework ────────────────────────────────────────────────────────────
+nicegui>=1.4.21
+
+# ── Database ──────────────────────────────────────────────────────────────────
+psycopg2-binary>=2.9
+SQLAlchemy>=2.0           # opzionale, per migrazione futura al connection pool SA
+
+# ── Autenticazione ────────────────────────────────────────────────────────────
+bcrypt>=4.0
+python-multipart>=0.0.6   # richiesto da FastAPI per cookie/form parsing
+
+# ── Calcoli finanziari ────────────────────────────────────────────────────────
+pandas>=2.0
+numpy>=1.26
+numpy-financial>=1.0
+
+# ── Grafici ───────────────────────────────────────────────────────────────────
+plotly>=5.20
+
+# ── Dati mercato ──────────────────────────────────────────────────────────────
+yfinance>=0.2
+
+# ── Google / Gmail API ───────────────────────────────────────────────────────
+google-auth>=2.28
+google-auth-oauthlib>=1.2
+google-api-python-client>=2.120
+
+# ── Utilità ───────────────────────────────────────────────────────────────────
+python-dateutil>=2.9
