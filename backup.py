@@ -37,6 +37,7 @@ TABELLE_PER_UTENTE = [
     "asset_settings",
     "finanziamenti",
     "spese_ricorrenti",
+    "notifiche_scadenze",
 ]
 
 
