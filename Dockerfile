@@ -27,9 +27,8 @@ COPY . .
 # ── Porta ────────────────────────────────────────────────────────────────────
 # Cloud Run inietta PORT=8080 automaticamente.
 # In locale (o Streamlit Cloud) la variabile non è impostata → default 8501.
-ENV PORT=8501
 EXPOSE 8080
 
 # ── Avvio ────────────────────────────────────────────────────────────────────
 # Usiamo sh -c per espandere $PORT a runtime (le istruzioni EXPOSE/ENV non
-CMD ["sh", "-c", "streamlit run interfaccia.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true"]
+CMD ["sh", "-c", "streamlit run interfaccia.py --server.port=${PORT:-8080} --server.address=0.0.0.0 --server.headless=true"]
