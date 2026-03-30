@@ -1,7 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Personal Budget Dashboard — Dockerfile
-# Compatibile con Streamlit Cloud (porta 8501) e Google Cloud Run (porta 8080).
-# La porta attiva è controllata dalla variabile PORT (default 8501).
 # ─────────────────────────────────────────────────────────────────────────────
 
 FROM python:3.11-slim
