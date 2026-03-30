@@ -208,8 +208,13 @@ def _send_weekly_notifications(recipients, df_calendar, today, dry_run=False):
       ok, msg = send_email(recipient, subject, body)
       logger.info("[WEEKLY] %s: %s", recipient, msg)
       if ok:
-          db.registra_notifica_scadenza(key_week, recipient, end_week.isoformat())
-          sent += 1
+        db.registra_notifica_scadenza(
+            key_week,
+            recipient,
+            end_week.isoformat(),
+            user_email=recipient,
+        )
+        sent += 1
   return sent
 
 
@@ -251,9 +256,14 @@ def _send_due_notifications(recipients, df_calendar, today, dry_run=False):
       ok, msg = send_email(recipient, subject, body)
       logger.info("[DUE1] %s: %s", recipient, msg)
       if ok:
-          for key, _ in pending_rows:
-              db.registra_notifica_scadenza(key, recipient, due_date.isoformat())
-          sent += 1
+        for key, _ in pending_rows:
+            db.registra_notifica_scadenza(
+                key,
+                recipient,
+                due_date.isoformat(),
+                user_email=recipient,
+            )
+        sent += 1
   return sent
 
 
