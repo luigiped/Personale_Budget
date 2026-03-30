@@ -1,55 +1,104 @@
 """
 pages/debiti.py
 ---------------
-Pagina DEBITI — Personal Budget Dashboard.
+Tab DEBITI — Personal Budget Dashboard.
 
 Contenuto:
-  - Grafico avanzamento finanziamenti (stacked bar: pagato + residuo)
-  - Pie chart totale pagato / residuo
+  - 4 KPI cards riepilogo (capitale, residuo, interessi pagati/residui)
+  - Grafico avanzamento finanziamenti (stacked bar orizzontale)
+  - Pie chart pagato vs residuo
+  - Grafico interessi pagati vs residui
   - Tabella riepilogo rate con colori semantici
 """
 
 import re
-from html import escape
 
 import pandas as pd
 import plotly.graph_objects as go
-from nicegui import ui
+import streamlit as st
+from html import escape
 
 import logiche as log
 from utils.constants import Colors, PLOTLY_CONFIG
-from utils.formatters import eur0, eur2
+from utils.formatters import eur0, eur2, format_eur, chip_html
 from utils.charts import style_fig
 from utils.html_tables import scroll_table, _td, _tr
 
-COLOR_PAGATO     = "#10d98a"
-COLOR_RESIDUO    = "#f26a6a"
-COLOR_RESIDUO_PIE = "rgba(242,106,106,0.55)"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Helper: calcola rate pagate ricavandole dai movimenti
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _mesi_pagati_da_mov(df_m: pd.DataFrame, nome_fin: str, rata=None, data_inizio=None) -> int | None:
+    """Inferisce le rate pagate cercando i movimenti che corrispondono al finanziamento."""
+    if df_m is None or df_m.empty:
+        return None
+
+    raw    = str(nome_fin or "").strip()
+    tokens = [raw]
+    if "." in raw:
+        tokens.append(raw.split(".")[-1])
+    tokens.append(re.sub(r"^fin\.?\s*", "", raw, flags=re.I))
+    for t in re.split(r"[\s\-_/.]+", raw):
+        if len(t.strip()) >= 3:
+            tokens.append(t.strip())
+    tokens  = list(dict.fromkeys(t for t in tokens if t.strip()))
+    pattern = "|".join(re.escape(t) for t in tokens) if tokens else None
+    if not pattern:
+        return None
+
+    tipo = df_m["Tipo"].astype(str).str.upper().str.strip()
+    mask = (tipo == "USCITA") & (
+        df_m["Dettaglio"].astype(str).str.contains(pattern, case=False, na=False) |
+        df_m["Note"].astype(str).str.contains(pattern, case=False, na=False)
+    )
+    df_f = df_m[mask].copy()
+    if df_f.empty:
+        return None
+
+    df_f["Data"] = pd.to_datetime(df_f["Data"], errors="coerce")
+    df_f = df_f[df_f["Data"].notna()]
+    if data_inizio is not None:
+        inizio = pd.to_datetime(data_inizio, errors="coerce")
+        if pd.notna(inizio):
+            df_f = df_f[df_f["Data"] >= inizio]
+    if df_f.empty:
+        return None
+
+    rata_abs = abs(float(rata)) if rata is not None else 0.0
+    if rata_abs > 0:
+        tol  = max(1.0, rata_abs * 0.25)
+        df_f = df_f[df_f["Importo"].abs().between(rata_abs - tol, rata_abs + tol)]
+
+    return int(len(df_f)) if not df_f.empty else None
 
 
-def render(user_email: str, anno_sel: int, mese_sel: int, settings: dict, data: dict) -> None:
-    """Entry point — chiamata da main.py."""
-    df_mov = data["df_mov"]
-    df_fin = data["df_fin"]
+# ──────────────────────────────────────────────────────────────────────────────
+# Render principale
+# ──────────────────────────────────────────────────────────────────────────────
 
-    ui.html("<div class='section-title'>DEBITI</div>")
+def render(ctx: dict) -> None:
+    df_fin = ctx["df_fin"]
+    df_mov = ctx["df_mov"]
+
+    st.markdown("<div class='section-title'>DEBITI</div>", unsafe_allow_html=True)
 
     if df_fin.empty:
-        ui.label("Nessun finanziamento presente. Aggiungilo nel tab Registro.").classes("text-sm").style("color: var(--txt-mid);")
+        st.info("Nessun finanziamento presente. Aggiungilo nel tab Registro.")
         return
 
-    # Calcolo avanzamento per ogni finanziamento
-    fin_rows     = []
-    dettagli_rows = []
-    totale_capitale   = df_fin["capitale_iniziale"].sum()
-    totale_residuo    = 0.0
-    interessi_pagati  = 0.0
-    interessi_totali  = 0.0
+    # ── Calcola aggregati ─────────────────────────────────────────────────────
+    totale_capitale  = df_fin["capitale_iniziale"].sum()
+    totale_residuo   = 0.0
+    interessi_pagati = 0.0
+    interessi_totali = 0.0
+    fin_rows         = []
+    dettagli_rows    = []
 
     for _, f in df_fin.iterrows():
         dati_base = log.calcolo_finanziamento(
             f["capitale_iniziale"], f["taeg"], f["durata_mesi"],
-            f["data_inizio"], f["giorno_scadenza"]
+            f["data_inizio"], f["giorno_scadenza"],
         )
         rate_db  = int(f["rate_pagate"]) if "rate_pagate" in f.index and pd.notna(f["rate_pagate"]) else None
         rate_mov = _mesi_pagati_da_mov(df_mov, f["nome"], dati_base["rata"], f["data_inizio"])
@@ -57,7 +106,7 @@ def render(user_email: str, anno_sel: int, mese_sel: int, settings: dict, data: 
         vals     = [v for v in [rate_db, rate_mov, rate_cal] if v is not None]
         rate_eff = max(vals) if vals else None
 
-        dati = log.calcolo_finanziamento(
+        dati    = log.calcolo_finanziamento(
             f["capitale_iniziale"], f["taeg"], f["durata_mesi"],
             f["data_inizio"], f["giorno_scadenza"],
             rate_pagate_override=rate_eff,
@@ -67,10 +116,11 @@ def render(user_email: str, anno_sel: int, mese_sel: int, settings: dict, data: 
 
         fin_rows.append({"Nome": f["nome"], "Pagato": pagato, "Residuo": residuo})
         dettagli_rows.append({
-            "Nome": f["nome"], "Rata": dati["rata"],
-            "Residuo": dati["debito_residuo"],
-            "% Completato": round(dati["percentuale_completato"], 1),
-            "Mesi rim.": dati["mesi_rimanenti"],
+            "Nome":          f["nome"],
+            "Rata":          dati["rata"],
+            "Residuo":       dati["debito_residuo"],
+            "% Completato":  round(dati["percentuale_completato"], 1),
+            "Mesi rim.":     dati["mesi_rimanenti"],
         })
         totale_residuo   += residuo
         interessi_pagati += dati["interessi_pagati"]
@@ -80,148 +130,111 @@ def render(user_email: str, anno_sel: int, mese_sel: int, settings: dict, data: 
     totale_pag = max(0.0, totale_capitale - totale_residuo)
     int_res    = max(0.0, interessi_totali - interessi_pagati)
 
-    # ── KPI sommario ──
-    with ui.grid(columns=4).classes("w-full gap-3 mb-4"):
-        _kpi_mini("Capitale totale",     eur2(totale_capitale),  Colors.TEXT)
-        _kpi_mini("Debito residuo",       eur2(totale_residuo),   Colors.RED)
-        _kpi_mini("Interessi pagati",     eur2(interessi_pagati), Colors.AMBER)
-        _kpi_mini("Interessi residui",    eur2(int_res),          Colors.AMBER)
+    # ── 4 KPI ─────────────────────────────────────────────────────────────────
+    _kpis = [
+        ("Capitale totale",   eur2(totale_capitale),  Colors.TEXT,       "rgba(79,142,240,0.15)"),
+        ("Debito residuo",    eur2(totale_residuo),   Colors.RED_BRIGHT, "rgba(250,89,142,0.18)"),
+        ("Interessi pagati",  eur2(interessi_pagati), Colors.AMBER,      "rgba(245,166,35,0.15)"),
+        ("Interessi residui", eur2(int_res),          Colors.AMBER,      "rgba(245,166,35,0.12)"),
+    ]
+    _cols = st.columns(4)
+    for _c, (_l, _v, _color, _glow) in zip(_cols, _kpis):
+        _c.markdown(
+            f"""<div style="background:#0c1120;border:1px solid rgba(92,118,178,0.22);
+            border-radius:14px;padding:18px 14px 14px;text-align:center;
+            box-shadow:0 4px 20px rgba(0,0,0,0.4),0 0 24px {_glow};position:relative;overflow:hidden;">
+  <div style="font-size:0.65rem;font-weight:700;letter-spacing:1.4px;text-transform:uppercase;
+    color:rgba(180,200,240,0.55);margin-bottom:8px;">{_l}</div>
+  <div style="font-family:'JetBrains Mono',monospace;font-size:1.2rem;font-weight:700;color:{_color};">{_v}</div>
+  <div style="position:absolute;bottom:0;left:0;right:0;height:2px;
+    background:linear-gradient(90deg,{_color}60,transparent);"></div>
+</div>""",
+            unsafe_allow_html=True,
+        )
 
-    # ── Grafici affiancati ──
-    with ui.grid(columns=2).classes("w-full gap-4 mb-4"):
+    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
-        with ui.card().style(
-            "background: var(--bg-card); border: 1px solid var(--bdr); border-radius: 12px; padding: 16px;"
-        ):
-            ui.html("<div class='panel-title'>📊 Avanzamento finanziamenti</div>")
-            _render_progress_chart(df_prog)
+    # ── Avanzamento + Pie ─────────────────────────────────────────────────────
+    c1, c2 = st.columns([1.4, 1], gap="large")
+    with c1:
+        st.markdown("<div class='panel-title'>📊 Avanzamento finanziamenti</div>", unsafe_allow_html=True)
+        fig_prog = go.Figure()
+        fig_prog.add_bar(
+            y=df_prog["Nome"], x=df_prog["Pagato"], orientation="h",
+            name="Totale pagato", marker_color="#10d98a", marker_cornerradius=6,
+            text=df_prog["Pagato"].map(eur0), textposition="inside",
+            insidetextanchor="middle", textfont=dict(color="#07090f", size=12),
+        )
+        fig_prog.add_bar(
+            y=df_prog["Nome"], x=df_prog["Residuo"], orientation="h",
+            name="Debito residuo", marker_color="#f26a6a", marker_cornerradius=6,
+            text=df_prog["Residuo"].map(eur0), textposition="inside",
+            insidetextanchor="middle", textfont=dict(color="#ffffff", size=12),
+        )
+        fig_prog.update_layout(barmode="stack", xaxis=dict(tickprefix="€ ", tickformat=",.0f"))
+        style_fig(fig_prog, height=300, show_legend=True)
+        st.plotly_chart(fig_prog, use_container_width=True, config=PLOTLY_CONFIG)
 
-        with ui.card().style(
-            "background: var(--bg-card); border: 1px solid var(--bdr); border-radius: 12px; padding: 16px;"
-        ):
-            ui.html("<div class='panel-title'>🥧 Pagato vs Residuo</div>")
-            _render_pie_chart(totale_pag, totale_residuo)
+    with c2:
+        st.markdown("<div class='panel-title'>🥧 Pagato vs Residuo</div>", unsafe_allow_html=True)
+        fig_pie = go.Figure(go.Pie(
+            labels=["Pagato", "Residuo"],
+            values=[totale_pag, totale_residuo],
+            hole=0.35, textinfo="percent+label",
+            marker=dict(colors=["#10d98a", "rgba(242,106,106,0.60)"]),
+            textfont=dict(size=13, color="#ffffff"),
+        ))
+        style_fig(fig_pie, height=300, show_legend=False)
+        st.plotly_chart(fig_pie, use_container_width=True, config=PLOTLY_CONFIG)
 
-    # ── Tabella riepilogo ──
-    with ui.card().classes("w-full").style(
-        "background: var(--bg-card); border: 1px solid var(--bdr); border-radius: 12px; padding: 16px;"
-    ):
-        ui.html("<div class='panel-title'>📋 Riepilogo rate</div>")
-        df_tabella = pd.DataFrame(dettagli_rows)
-        if not df_tabella.empty:
-            _render_dettagli_table(df_tabella)
+    # ── Interessi + Riepilogo rate ────────────────────────────────────────────
+    c3, c4 = st.columns([1, 1.3], gap="large")
+    with c3:
+        st.markdown("<div class='panel-title'>💰 Interessi pagati vs residui</div>", unsafe_allow_html=True)
+        fig_int = go.Figure()
+        fig_int.add_bar(
+            y=["Interessi"], x=[interessi_pagati], orientation="h",
+            name="Quota pagata", marker_color="#f5a623", marker_cornerradius=6,
+            text=[eur0(interessi_pagati)], textposition="inside",
+            insidetextanchor="middle", textfont=dict(color="#07090f", size=13),
+        )
+        fig_int.add_bar(
+            y=["Interessi"], x=[int_res], orientation="h",
+            name="Interessi residui", marker_color="#5a6f8c", marker_cornerradius=6,
+            text=[eur0(int_res)], textposition="inside",
+            insidetextanchor="middle", textfont=dict(color="#ffffff", size=13),
+        )
+        fig_int.update_layout(
+            barmode="stack",
+            xaxis=dict(tickprefix="€ ", tickformat=",.0f"),
+            yaxis=dict(tickfont=dict(color=Colors.TEXT)),
+            margin=dict(l=10, r=40, t=20, b=10),
+        )
+        style_fig(fig_int, height=180, show_legend=True)
+        st.plotly_chart(fig_int, use_container_width=True, config=PLOTLY_CONFIG)
 
-
-# ---------------------------------------------------------------------------
-# KPI mini
-# ---------------------------------------------------------------------------
-
-def _kpi_mini(label: str, value: str, color: str) -> None:
-    with ui.element("div").style(
-        f"background: var(--bg-form); border: 1px solid var(--bdr); border-radius: 8px; "
-        f"padding: 12px 14px; text-align: center;"
-    ):
-        ui.html(f"<div style='font-size:0.62rem;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;color:var(--txt-mid);margin-bottom:6px;'>{label}</div>")
-        ui.html(f"<div style='font-family:JetBrains Mono,monospace;font-size:0.95rem;font-weight:700;color:{color};'>{value}</div>")
-
-
-# ---------------------------------------------------------------------------
-# Grafico avanzamento (stacked bar orizzontale)
-# ---------------------------------------------------------------------------
-
-def _render_progress_chart(df_prog: pd.DataFrame) -> None:
-    fig = go.Figure()
-    fig.add_bar(
-        y=df_prog["Nome"], x=df_prog["Pagato"], orientation="h",
-        name="Totale pagato", marker_color=COLOR_PAGATO, marker_cornerradius=6,
-        text=df_prog["Pagato"].map(eur0), textposition="inside",
-        insidetextanchor="middle", textfont=dict(color="#ffffff", size=13),
-    )
-    fig.add_bar(
-        y=df_prog["Nome"], x=df_prog["Residuo"], orientation="h",
-        name="Debito residuo", marker_color=COLOR_RESIDUO, marker_cornerradius=6,
-        text=df_prog["Residuo"].map(eur0), textposition="inside",
-        insidetextanchor="middle", textfont=dict(color="#ffffff", size=13),
-    )
-    fig.update_layout(barmode="stack", xaxis=dict(tickprefix="€ ", tickformat=",.0f"))
-    style_fig(fig, height=320, show_legend=True)
-    ui.plotly(fig).classes("w-full")
-
-
-# ---------------------------------------------------------------------------
-# Pie chart
-# ---------------------------------------------------------------------------
-
-def _render_pie_chart(totale_pag: float, totale_residuo: float) -> None:
-    fig = go.Figure(go.Pie(
-        labels=["Pagato", "Residuo"],
-        values=[totale_pag, totale_residuo],
-        hole=0.35, textinfo="percent",
-        marker=dict(colors=[COLOR_PAGATO, COLOR_RESIDUO_PIE]),
-        textfont=dict(size=15),
-    ))
-    style_fig(fig, height=320, show_legend=True)
-    ui.plotly(fig).classes("w-full")
-
-
-# ---------------------------------------------------------------------------
-# Tabella riepilogo finanziamenti
-# ---------------------------------------------------------------------------
-
-def _render_dettagli_table(df_tabella: pd.DataFrame) -> None:
-    debt_rows = []
-    for _, row in df_tabella.iterrows():
-        perc       = float(row["% Completato"])
-        mesi_r     = int(row["Mesi rim."])
-        perc_color = Colors.GREEN if perc >= 50 else Colors.AMBER if perc >= 25 else Colors.RED
-        mesi_color = Colors.RED   if mesi_r > 120 else Colors.AMBER if mesi_r > 36 else Colors.GREEN
-        debt_rows.append(_tr([
-            _td(f"<strong>{escape(str(row['Nome']))}</strong>", color=Colors.TEXT, weight=600),
-            _td(eur2(row["Rata"]),     color=Colors.RED,  mono=True, weight=600),
-            _td(eur2(row["Residuo"]),  color=Colors.TEXT, mono=True),
-            _td(f"{perc:.1f}%",        color=perc_color,  mono=True, align="center"),
-            _td(str(mesi_r),           color=mesi_color,  mono=True, align="center"),
-        ]))
-    ui.html(scroll_table(
-        title="Riepilogo finanziamenti", right_html="",
-        columns=[("Nome","left"),("Rata","center"),("Residuo","center"),("% Compl.","center"),("Mesi","left")],
-        widths=[1.4, 1.1, 1.5, 0.9, 0.7],
-        rows_html=debt_rows, height_px=230,
-    )).classes("w-full")
-
-
-# ---------------------------------------------------------------------------
-# Helper: conta rate pagate dai movimenti
-# ---------------------------------------------------------------------------
-
-def _mesi_pagati_da_mov(df_m: pd.DataFrame, nome_fin: str, rata=None, data_inizio=None):
-    def _fin_match_pattern(nome: str):
-        tokens = [t for t in re.split(r"[\s\-_/]+", nome.strip()) if len(t) >= 3]
-        return "|".join(re.escape(t) for t in tokens) if tokens else None
-
-    if df_m is None or df_m.empty:
-        return None
-    pattern = _fin_match_pattern(nome_fin)
-    if not pattern:
-        return None
-    tipo  = df_m["Tipo"].astype(str).str.upper().str.strip()
-    mask  = (tipo == "USCITA") & (
-        df_m["Dettaglio"].astype(str).str.contains(pattern, case=False, na=False) |
-        df_m["Note"].astype(str).str.contains(pattern, case=False, na=False)
-    )
-    df_f = df_m[mask].copy()
-    if df_f.empty:
-        return None
-    df_f["Data"] = pd.to_datetime(df_f["Data"], errors="coerce")
-    df_f = df_f[df_f["Data"].notna()]
-    if data_inizio is not None:
-        inizio = pd.to_datetime(data_inizio, errors="coerce")
-        if pd.notna(inizio):
-            df_f = df_f[df_f["Data"] >= inizio]
-    if df_f.empty:
-        return None
-    rata_abs = abs(float(rata)) if rata is not None else 0.0
-    if rata_abs > 0:
-        tol  = max(1.0, rata_abs * 0.25)
-        df_f = df_f[df_f["Importo"].abs().between(rata_abs - tol, rata_abs + tol)]
-    return int(len(df_f)) if not df_f.empty else None
+    with c4:
+        st.markdown("<div class='panel-title'>📋 Riepilogo rate</div>", unsafe_allow_html=True)
+        df_tab = pd.DataFrame(dettagli_rows)
+        if not df_tab.empty:
+            debt_rows = []
+            for _, row in df_tab.iterrows():
+                perc   = float(row["% Completato"])
+                mesi_r = int(row["Mesi rim."])
+                pc = Colors.GREEN if perc >= 50 else Colors.AMBER if perc >= 25 else Colors.RED
+                mc = Colors.RED   if mesi_r > 120 else Colors.AMBER if mesi_r > 36 else Colors.GREEN
+                debt_rows.append(_tr([
+                    _td(f"<strong>{escape(str(row['Nome']))}</strong>", color=Colors.TEXT, weight=600),
+                    _td(eur2(row["Rata"]),    color=Colors.RED,  mono=True, weight=600),
+                    _td(eur2(row["Residuo"]), color=Colors.TEXT, mono=True),
+                    _td(f"{perc:.1f}%",       color=pc,          mono=True, align="center"),
+                    _td(str(mesi_r),          color=mc,          mono=True, align="center"),
+                ]))
+            st.markdown(scroll_table(
+                title="Riepilogo finanziamenti", right_html="",
+                columns=[("Nome","left"),("Rata","center"),("Residuo","center"),("% Compl.","center"),("Mesi","left")],
+                widths=[1.4, 1.1, 1.5, 0.9, 0.7],
+                rows_html=debt_rows, height_px=230,
+            ), unsafe_allow_html=True)
+        else:
+            st.info("Nessun finanziamento trovato.")
