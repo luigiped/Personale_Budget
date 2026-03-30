@@ -29,3 +29,5 @@ google-api-python-client>=2.120
 
 # ── Utilità ───────────────────────────────────────────────────────────────────
 python-dateutil>=2.9
+flask
+gunicorn
