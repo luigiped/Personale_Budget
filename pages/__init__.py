@@ -1,0 +1,1 @@
+"""pages — moduli condivisi framework-agnostic."""
