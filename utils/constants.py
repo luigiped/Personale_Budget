@@ -101,7 +101,7 @@ class Colors:
 
     GREEN       = "#10d98a"
     GREEN_BRIGHT = "#5ce488"
-    RED         = "#f26a6a"
+    RED         = "#f13434"
     RED_BRIGHT  = "#fa598e"
     AMBER       = "#f5a623"
     VIOLET      = "#9b74f5"
@@ -118,10 +118,10 @@ class Colors:
 
     # Colori per categoria budget
     BUDGET_COLORS: dict[str, tuple[str, str]] = {
-        "NECESSITÀ":    ("#4f8ef0", "#1d3a6e"),
-        "SVAGO":        ("#f472b6", "#6d2040"),
-        "INVESTIMENTI": ("#10d98a", "#0a4a36"),
-    }
+    "NECESSITÀ":    ("#4f8ef0", "#1d3a6e"),
+    "SVAGO":        ("#f472b6", "#6d2040"),
+    "INVESTIMENTI": ("#10d98a", "#0a4a36"),
+}
 
 # ---------------------------------------------------------------------------
 # Configurazione Plotly

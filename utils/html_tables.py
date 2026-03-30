@@ -49,7 +49,6 @@ def _tr(cells: list[str], style: str = "") -> str:
     style_attr = f" style='{style}'" if style else ""
     return f"<tr{style_attr}>" + "".join(cells) + "</tr>"
 
-
 def _colgroup(widths: list[float]) -> str:
     total = float(sum(widths) or 1)
     return "".join(
@@ -109,7 +108,7 @@ def render_calendario_html(df: pd.DataFrame) -> str:
     cols = ["Spesa Prevista", "Importo", "Giorno Previsto", "Data Fine Prevista", "Stato", "Frequenza"]
 
     header_cells = "".join(
-        f"<th style='padding:8px 13px;font-size:0.68rem;font-weight:700;"
+        f"<th style='padding:8px 13px;font-size:0.60rem;font-weight:700;"
         f"letter-spacing:1px;text-transform:uppercase;color:{Colors.TEXT_MID};"
         f"text-align:left;background:rgba(0,0,0,0.18);"
         f"border-bottom:1px solid rgba(79,142,240,0.12);white-space:nowrap;'>{c}</th>"
@@ -125,7 +124,7 @@ def render_calendario_html(df: pd.DataFrame) -> str:
         freq_str = str(row.get("Frequenza", "Mensile"))
 
         cells = [
-            f"<td style='padding:10px 13px;font-size:0.85rem;color:{Colors.TEXT};'>"
+            f"<td style='padding:10px 13px;font-size:0.82rem;color:{Colors.TEXT};'>"
             f"{escape(str(row.get('Spesa Prevista', '')))}</td>",
 
             f"<td style='padding:10px 13px;font-family:{FONT_MONO};"

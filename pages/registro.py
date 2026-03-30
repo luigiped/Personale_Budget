@@ -1,568 +1,501 @@
 """
 pages/registro.py
 -----------------
-Pagina REGISTRO — Personal Budget Dashboard.
+Tab REGISTRO — Personal Budget Dashboard.
 
 Sezioni:
   1. Nuova Transazione (form inserimento movimento)
-  2. Spese Ricorrenti (aggiungi, lista, elimina)
-  3. Finanziamenti (aggiungi, lista, elimina)
+  2. Spese Ricorrenti  (form aggiungi + lista + elimina)
+  3. Finanziamenti     (form aggiungi + lista + elimina)
   4. Storico Movimenti (filtri + tabella scrollabile + elimina)
-  5. Backup Dati (download SQL on-demand)
+  5. Backup Dati       (download SQL on-demand)
 """
 
 import re
-from datetime import datetime, date
+from datetime import datetime
 from html import escape
 
 import pandas as pd
-from nicegui import ui
+import streamlit as st
 
 import Database as db
 import logiche as log
 from utils.constants import Colors, STRUTTURA_CATEGORIE, FREQ_OPTIONS, FREQ_MAP, PLOTLY_CONFIG
 from utils.formatters import format_eur, eur2, chip_html
 from utils.html_tables import scroll_table, render_ricorrenti_rows, _td, _tr
-from config_runtime import get_secret
 
 
-def render(user_email: str, anno_sel: int, mese_sel: int, settings: dict, data: dict) -> None:
-    """Entry point — chiamata da main.py."""
-    ui.html("<div class='section-title'>REGISTRO</div>")
+# ── Helper: mesi pagati da movimenti (usato nella tabella finanziamenti) ──────
 
-    _render_nuova_transazione(user_email, data)
-    ui.html("<div style='height:12px'></div>")
-    _render_spese_ricorrenti(user_email)
-    ui.html("<div style='height:12px'></div>")
-    _render_finanziamenti(user_email, data)
-    ui.html("<div style='height:12px'></div>")
-    _render_storico_movimenti(user_email, data)
-    ui.html("<div style='height:12px'></div>")
-    _render_backup(user_email)
+def _mesi_pagati_da_mov(df_m: pd.DataFrame, nome_fin: str, rata=None, data_inizio=None) -> int | None:
+    if df_m is None or df_m.empty:
+        return None
+    raw    = str(nome_fin or "").strip()
+    tokens = [raw]
+    if "." in raw:
+        tokens.append(raw.split(".")[-1])
+    tokens.append(re.sub(r"^fin\.?\s*", "", raw, flags=re.I))
+    for t in re.split(r"[\s\-_/.]+", raw):
+        if len(t.strip()) >= 3:
+            tokens.append(t.strip())
+    tokens  = list(dict.fromkeys(t for t in tokens if t.strip()))
+    pattern = "|".join(re.escape(t) for t in tokens) if tokens else None
+    if not pattern:
+        return None
+    tipo = df_m["Tipo"].astype(str).str.upper().str.strip()
+    mask = (tipo == "USCITA") & (
+        df_m["Dettaglio"].astype(str).str.contains(pattern, case=False, na=False) |
+        df_m["Note"].astype(str).str.contains(pattern, case=False, na=False)
+    )
+    df_f = df_m[mask].copy()
+    if df_f.empty:
+        return None
+    df_f["Data"] = pd.to_datetime(df_f["Data"], errors="coerce")
+    df_f = df_f[df_f["Data"].notna()]
+    if data_inizio is not None:
+        inizio = pd.to_datetime(data_inizio, errors="coerce")
+        if pd.notna(inizio):
+            df_f = df_f[df_f["Data"] >= inizio]
+    if df_f.empty:
+        return None
+    rata_abs = abs(float(rata)) if rata is not None else 0.0
+    if rata_abs > 0:
+        tol  = max(1.0, rata_abs * 0.25)
+        df_f = df_f[df_f["Importo"].abs().between(rata_abs - tol, rata_abs + tol)]
+    return int(len(df_f)) if not df_f.empty else None
 
 
-# ---------------------------------------------------------------------------
-# 1. Nuova Transazione
-# ---------------------------------------------------------------------------
+# ══════════════════════════════════════════════════════════════════════════════
+# Render principale
+# ══════════════════════════════════════════════════════════════════════════════
 
-def _render_nuova_transazione(user_email: str, data: dict) -> None:
-    with ui.card().classes("w-full").style(
-        "background: var(--bg-card); border: 1px solid var(--bdr); border-radius: 12px; padding: 20px;"
-    ):
-        ui.html("""<div style="display:flex;align-items:center;gap:10px;margin-bottom:18px;">
+def render(ctx: dict) -> None:
+    user_email       = ctx["user_email"]
+    df_mov           = ctx["df_mov"]
+    df_fin           = ctx["df_fin"]
+    invalidate_cache = ctx["invalidate_cache"]
+
+    st.markdown("<div class='section-title'>REGISTRO</div>", unsafe_allow_html=True)
+
+    # Banner successo post-rerun
+    if st.session_state.pop("_banner_mov", False):
+        st.success("✅ Movimento registrato con successo!")
+
+    # ── 1. Nuova Transazione ──────────────────────────────────────────────────
+    with st.container(border=True):
+        st.markdown(
+            """<div style="display:flex;align-items:center;gap:10px;margin-bottom:18px;">
   <div style="width:28px;height:28px;border-radius:7px;background:rgba(79,142,240,0.12);
               display:flex;align-items:center;justify-content:center;font-size:15px;">💳</div>
   <span style="font-size:13px;font-weight:700;color:#dde6f5;">Nuova Transazione</span>
-</div>""")
+</div>""",
+            unsafe_allow_html=True,
+        )
+        col_tipo, col_cat, col_det, col_data = st.columns([1, 1, 1.5, 1])
+        tipo_inserito    = col_tipo.radio("Tipo movimento", ["↑ Uscita", "↓ Entrata"], horizontal=True, key="reg_tipo_radio")
+        tipo_val         = "USCITA" if "Uscita" in tipo_inserito else "ENTRATA"
+        categoria_scelta = col_cat.selectbox("Categoria", list(STRUTTURA_CATEGORIE.keys()), key="reg_categoria")
+        dettagli_filtrati = STRUTTURA_CATEGORIE[categoria_scelta]
+        dettaglio_scelto = col_det.selectbox("Dettaglio", dettagli_filtrati, key="reg_dettaglio")
+        data_inserita    = col_data.date_input("Data", datetime.now(), key="reg_data")
 
-        # Riga 1: Tipo / Categoria / Dettaglio / Data
-        with ui.grid(columns=4).classes("w-full gap-3"):
-            tipo_radio = ui.radio(
-                options={"USCITA": "↑ Uscita", "ENTRATA": "↓ Entrata"},
-                value="USCITA",
-            ).props("inline").style("color: var(--txt);")
+        col_imp, col_note = st.columns([1, 3])
+        importo_inserito  = col_imp.number_input("Importo (€)", min_value=0.0, step=0.01, format="%.2f", key="reg_importo")
+        note_inserite     = col_note.text_input("Note", placeholder="Descrizione opzionale…", key="reg_note")
 
-            cat_select = ui.select(
-                options=list(STRUTTURA_CATEGORIE.keys()),
-                value=list(STRUTTURA_CATEGORIE.keys())[0],
-                label="Categoria",
-            ).classes("w-full").props("outlined dense")
-            cat_select.style("background: var(--bg-inp); color: var(--txt);")
-
-            det_select = ui.select(
-                options=STRUTTURA_CATEGORIE[list(STRUTTURA_CATEGORIE.keys())[0]],
-                value=STRUTTURA_CATEGORIE[list(STRUTTURA_CATEGORIE.keys())[0]][0],
-                label="Dettaglio",
-            ).classes("w-full").props("outlined dense")
-            det_select.style("background: var(--bg-inp); color: var(--txt);")
-
-            data_inp = ui.date(value=date.today().isoformat()).props("outlined dense").classes("w-full")
-            data_inp.style("background: var(--bg-inp); color: var(--txt);")
-
-        # Aggiorna dettagli quando cambia categoria
-        def on_cat_change():
-            cat = cat_select.value
-            opts = STRUTTURA_CATEGORIE.get(cat, [])
-            det_select.options = opts
-            det_select.value = opts[0] if opts else ""
-            det_select.update()
-
-        cat_select.on("update:model-value", lambda: on_cat_change())
-
-        # Riga 2: Importo / Note
-        with ui.grid(columns=4).classes("w-full gap-3 mt-2"):
-            importo_inp = ui.number(
-                label="Importo (€)", value=0.0, min=0.0, step=0.01, format="%.2f",
-            ).classes("w-full").props("outlined dense")
-            importo_inp.style("background: var(--bg-inp); color: var(--txt);")
-
-            note_inp = ui.input(
-                label="Note", placeholder="Descrizione opzionale…",
-            ).classes("col-span-3 w-full").props("outlined dense")
-            note_inp.style("background: var(--bg-inp); color: var(--txt);")
-
-        # Pulsanti
-        with ui.row().classes("gap-3 mt-3"):
-            def registra():
-                imp = float(importo_inp.value or 0)
-                if imp <= 0:
-                    ui.notify("Inserisci un importo maggiore di zero.", type="warning")
-                    return
+        col_btn, col_ann, _ = st.columns([1.2, 0.8, 3])
+        if col_btn.button("＋ Registra Movimento", key="btn_registra_mov", use_container_width=True, type="primary"):
+            if importo_inserito <= 0:
+                st.warning("Inserisci un importo maggiore di zero.")
+            else:
                 try:
-                    d = data_inp.value
-                    if isinstance(d, str):
-                        d = datetime.fromisoformat(d).date()
                     db.aggiungi_movimento(
-                        d, tipo_radio.value,
-                        cat_select.value, det_select.value,
-                        imp, note_inp.value or "", user_email=user_email,
+                        data_inserita, tipo_val, categoria_scelta, dettaglio_scelto,
+                        importo_inserito, note_inserite, user_email=user_email,
                     )
-                    importo_inp.value = 0.0
-                    note_inp.value = ""
-                    ui.notify("✅ Movimento registrato con successo!", type="positive")
-                    ui.navigate.reload()
+                    invalidate_cache()
+                    st.session_state["_banner_mov"] = True
+                    for k in ["reg_importo", "reg_note", "reg_data"]:
+                        st.session_state.pop(k, None)
+                    st.rerun()
                 except Exception as exc:
-                    ui.notify(f"Errore salvataggio: {exc}", type="negative")
+                    st.error(f"Errore salvataggio: {exc}")
+        if col_ann.button("Annulla", key="btn_annulla_mov", use_container_width=True):
+            for k in ["reg_importo", "reg_note", "reg_data"]:
+                st.session_state.pop(k, None)
+            st.rerun()
 
-            def annulla():
-                importo_inp.value = 0.0
-                note_inp.value = ""
-
-            ui.button("＋ Registra Movimento", on_click=registra).props("unelevated").style(
-                "background: var(--acc); color: #fff; font-weight: 600;"
-            )
-            ui.button("Annulla", on_click=annulla).props("flat").style("color: var(--txt-mid);")
-
-
-# ---------------------------------------------------------------------------
-# 2. Spese Ricorrenti
-# ---------------------------------------------------------------------------
-
-def _render_spese_ricorrenti(user_email: str) -> None:
-    df_ric = db.carica_spese_ricorrenti(user_email)
-    n_ric  = len(df_ric) if not df_ric.empty else 0
-
-    with ui.card().classes("w-full").style(
-        "background: var(--bg-card); border: 1px solid var(--bdr); border-radius: 12px; padding: 20px;"
-    ):
-        with ui.row().classes("items-center justify-between w-full mb-4"):
-            ui.html("<span style='font-size:13px;font-weight:700;color:#dde6f5;'>🔁 Spese Ricorrenti</span>")
-            ui.html(
-                f"<span style='font-size:10px;padding:3px 10px;border-radius:20px;"
-                f"background:rgba(79,142,240,0.12);color:#82b4f7;"
-                f"border:1px solid rgba(79,142,240,0.28);'>{n_ric} attive</span>"
-            )
-
-        # Form aggiungi
-        with ui.grid(columns=3).classes("w-full gap-3"):
-            desc_inp  = ui.input("Descrizione spesa").classes("w-full").props("outlined dense")
-            desc_inp.style("background: var(--bg-inp); color: var(--txt);")
-            imp_inp   = ui.number("Importo (€)", value=0.0, min=0.0, step=0.01, format="%.2f").classes("w-full").props("outlined dense")
-            imp_inp.style("background: var(--bg-inp); color: var(--txt);")
-            freq_sel  = ui.select(options=list(FREQ_OPTIONS.keys()), value="Mensile", label="Frequenza").classes("w-full").props("outlined dense")
-            freq_sel.style("background: var(--bg-inp); color: var(--txt);")
-
-        with ui.grid(columns=4).classes("w-full gap-3 mt-2"):
-            giorno_inp    = ui.number("Giorno scadenza", value=1, min=1, max=31, step=1).classes("w-full").props("outlined dense")
-            giorno_inp.style("background: var(--bg-inp); color: var(--txt);")
-            inizio_inp    = ui.date(value=date.today().isoformat()).props("outlined dense").classes("w-full")
-            inizio_inp.style("background: var(--bg-inp); color: var(--txt);")
-            senza_fine    = ui.checkbox("Senza data fine", value=False)
-            senza_fine.style("color: var(--txt);")
-            fine_inp      = ui.date(value=date.today().isoformat()).props("outlined dense").classes("w-full")
-            fine_inp.style("background: var(--bg-inp); color: var(--txt);")
-
-        def toggle_fine():
-            fine_inp.set_visibility(not senza_fine.value)
-
-        senza_fine.on("update:model-value", lambda: toggle_fine())
-
-        def aggiungi_ricorrente():
-            desc = desc_inp.value.strip()
-            imp  = float(imp_inp.value or 0)
-            if not desc or imp <= 0:
-                ui.notify("Inserisci descrizione e importo.", type="warning")
-                return
-            try:
-                d_inizio = date.fromisoformat(inizio_inp.value) if isinstance(inizio_inp.value, str) else inizio_inp.value
-                d_fine   = None if senza_fine.value else (date.fromisoformat(fine_inp.value) if isinstance(fine_inp.value, str) else fine_inp.value)
-                db.aggiungi_spesa_ricorrente(
-                    desc, imp, int(giorno_inp.value), FREQ_OPTIONS[freq_sel.value],
-                    d_inizio, d_fine, user_email=user_email,
-                )
-                ui.notify("✅ Spesa ricorrente salvata!", type="positive")
-                ui.navigate.reload()
-            except Exception as exc:
-                ui.notify(f"Errore: {exc}", type="negative")
-
-        ui.button("＋ Aggiungi Ricorrente", on_click=aggiungi_ricorrente).props("unelevated").style(
-            "background: var(--acc); color: #fff; font-weight: 600; margin-top: 8px;"
+    # ── 2. Spese Ricorrenti ───────────────────────────────────────────────────
+    with st.container(border=True):
+        df_ric = db.carica_spese_ricorrenti(user_email)
+        n_ric  = len(df_ric) if not df_ric.empty else 0
+        st.markdown(
+            f"""<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+  <span style="font-size:13px;font-weight:700;color:#dde6f5;">🔁 Spese Ricorrenti</span>
+  <span style="font-size:10px;padding:3px 10px;border-radius:20px;background:rgba(79,142,240,0.12);
+               color:#82b4f7;border:1px solid rgba(79,142,240,0.28);">{n_ric} attive</span>
+</div>""",
+            unsafe_allow_html=True,
         )
 
-        # Tabella ricorrenti
+        with st.form("form_spese_ricorrenti", clear_on_submit=False):
+            c_desc, c_imp, c_freq = st.columns([2, 1, 1])
+            descrizione = c_desc.text_input("Descrizione spesa", key="ric_desc")
+            importo_ric = c_imp.number_input("Importo (€)", min_value=0.0, step=0.01, key="ric_importo")
+            freq_label  = c_freq.selectbox("Frequenza", list(FREQ_OPTIONS.keys()), key="ric_freq")
+            freq_val    = FREQ_OPTIONS[freq_label]
+
+            c_g, c_s, c_e, c_check = st.columns([1, 1, 1, 1])
+            giorno_scad = c_g.number_input("Giorno scadenza", 1, 31, 1, 1, key="ric_giorno")
+            data_inizio = c_s.date_input("Data inizio", datetime.now(), key="ric_data_inizio")
+            senza_fine  = c_check.checkbox("Senza data fine", value=False, key="ric_senza_fine")
+            data_fine   = None if senza_fine else c_e.date_input("Data fine", datetime.now(), key="ric_data_fine")
+
+            if st.form_submit_button("＋ Aggiungi Ricorrente"):
+                if descrizione and importo_ric > 0:
+                    try:
+                        db.aggiungi_spesa_ricorrente(
+                            descrizione, importo_ric, giorno_scad, freq_val,
+                            data_inizio, data_fine, user_email=user_email,
+                        )
+                        invalidate_cache()
+                        st.session_state["_banner_ric"] = True
+                        for k in ["ric_desc", "ric_importo", "ric_giorno"]:
+                            st.session_state.pop(k, None)
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Errore: {exc}")
+                else:
+                    st.warning("Inserisci descrizione e importo.")
+
+        if st.session_state.pop("_banner_ric", False):
+            st.success("✅ Spesa ricorrente salvata!")
+
         if not df_ric.empty:
-            tot_mensile = df_ric["importo"].sum()
-            ric_rows    = render_ricorrenti_rows(df_ric, FREQ_MAP)
-            ui.html(scroll_table(
+            tot_mensile   = df_ric["importo"].sum()
+            ric_rows_html = render_ricorrenti_rows(df_ric, FREQ_MAP)
+            st.markdown(scroll_table(
                 title="Elenco ricorrenti",
                 right_html=f"{format_eur(tot_mensile, 2)} / mese",
                 columns=[("#","left"),("Descrizione","left"),("Importo","left"),("Frequenza","left"),("Scad.","center"),("Inizio","center"),("Fine","center")],
                 widths=[0.45, 2.6, 1.1, 1.25, 0.7, 1.1, 0.9],
-                rows_html=ric_rows, height_px=280,
-            )).classes("w-full mt-3")
+                rows_html=ric_rows_html, height_px=320,
+            ), unsafe_allow_html=True)
 
-            # Elimina ricorrente
-            ric_options = {
-                str(row["id"]): f"{row['descrizione']} | {format_eur(row['importo'], 2)}"
-                for _, row in df_ric.iterrows()
-            }
-            with ui.row().classes("items-end gap-3 mt-3"):
-                sel_ric = ui.select(
-                    options=ric_options, label="Seleziona ricorrente da eliminare",
-                ).classes("flex-1").props("outlined dense")
-                sel_ric.style("background: var(--bg-inp); color: var(--txt);")
-
-                confirm_ric = {"pending": False}
-
-                def richiedi_elimina_ric():
-                    confirm_ric["pending"] = True
-                    confirm_banner_ric.set_visibility(True)
-
-                def conferma_elimina_ric():
-                    try:
-                        db.elimina_spesa_ricorrente(int(sel_ric.value), user_email=user_email)
-                        ui.notify("✅ Spesa ricorrente eliminata.", type="positive")
-                        ui.navigate.reload()
-                    except Exception as exc:
-                        ui.notify(f"Errore: {exc}", type="negative")
-
-                def annulla_elimina_ric():
-                    confirm_ric["pending"] = False
-                    confirm_banner_ric.set_visibility(False)
-
-                ui.button("🗑️ Elimina", on_click=richiedi_elimina_ric).props("unelevated").style(
-                    "background: var(--red-dim, rgba(242,106,106,0.15)); color: var(--red, #f26a6a); border: 1px solid rgba(242,106,106,0.3);"
-                )
-
-            confirm_banner_ric = ui.element("div").classes("w-full")
-            with confirm_banner_ric:
-                ui.html("<div style='color: var(--amber); font-size:0.85rem; margin:8px 0;'>⚠️ Operazione irreversibile. Confermi l'eliminazione?</div>")
-                with ui.row().classes("gap-3"):
-                    ui.button("🗑️ Sì, elimina", on_click=conferma_elimina_ric).props("unelevated").style("background: var(--red, #f26a6a); color: #fff;")
-                    ui.button("Annulla", on_click=annulla_elimina_ric).props("flat").style("color: var(--txt-mid);")
-            confirm_banner_ric.set_visibility(False)
-
-
-# ---------------------------------------------------------------------------
-# 3. Finanziamenti
-# ---------------------------------------------------------------------------
-
-def _render_finanziamenti(user_email: str, data: dict) -> None:
-    df_fin = data["df_fin"]
-    df_mov = data["df_mov"]
-    n_fin  = len(df_fin) if not df_fin.empty else 0
-
-    with ui.card().classes("w-full").style(
-        "background: var(--bg-card); border: 1px solid var(--bdr); border-radius: 12px; padding: 20px;"
-    ):
-        with ui.row().classes("items-center justify-between w-full mb-4"):
-            ui.html("<span style='font-size:13px;font-weight:700;color:#dde6f5;'>🏦 Finanziamenti</span>")
-            ui.html(
-                f"<span style='font-size:10px;padding:3px 10px;border-radius:20px;"
-                f"background:rgba(79,142,240,0.12);color:#82b4f7;"
-                f"border:1px solid rgba(79,142,240,0.28);'>{n_fin} attivi</span>"
+            col_sel, col_btn = st.columns([4, 1], vertical_alignment="bottom")
+            ric_id = col_sel.selectbox(
+                "Seleziona ricorrente da eliminare",
+                df_ric["id"].tolist(),
+                format_func=lambda sid: (
+                    f"{df_ric.loc[df_ric['id']==sid].iloc[0]['descrizione']} | "
+                    f"{format_eur(df_ric.loc[df_ric['id']==sid].iloc[0]['importo'], 2)}"
+                    if not df_ric[df_ric["id"]==sid].empty else str(sid)
+                ),
+                key="sel_del_ric",
             )
+            if col_btn.button("🗑️ Elimina", key="btn_del_ric", use_container_width=True):
+                st.session_state["pending_delete_ric"] = ric_id
 
-        # Form aggiungi
-        with ui.grid(columns=3).classes("w-full gap-3"):
-            nome_inp  = ui.input("Nome finanziamento").classes("w-full").props("outlined dense")
-            nome_inp.style("background: var(--bg-inp); color: var(--txt);")
-            cap_inp   = ui.number("Capitale iniziale (€)", value=0.0, step=0.1, format="%.2f").classes("w-full").props("outlined dense")
-            cap_inp.style("background: var(--bg-inp); color: var(--txt);")
-            taeg_inp  = ui.number("TAEG (%)", value=0.0, step=0.01).classes("w-full").props("outlined dense")
-            taeg_inp.style("background: var(--bg-inp); color: var(--txt);")
+            if st.session_state.get("pending_delete_ric") is not None:
+                sid  = st.session_state["pending_delete_ric"]
+                desc_vals = df_ric.loc[df_ric["id"] == sid, "descrizione"].values
+                desc = desc_vals[0] if len(desc_vals) > 0 else str(sid)
+                st.warning(f"⚠️ Elimina **{desc}**? Operazione irreversibile.")
+                cc1, cc2 = st.columns(2)
+                if cc1.button("🗑️ Sì, elimina", key="confirm_del_ric", use_container_width=True, type="primary"):
+                    db.elimina_spesa_ricorrente(sid, user_email=user_email)
+                    invalidate_cache()
+                    del st.session_state["pending_delete_ric"]
+                    st.session_state["_success_ric_ts"] = datetime.now().timestamp()
+                    st.rerun()
+                if cc2.button("Annulla", key="cancel_del_ric", use_container_width=True):
+                    del st.session_state["pending_delete_ric"]
+                    st.rerun()
 
-        with ui.grid(columns=4).classes("w-full gap-3 mt-2"):
-            dur_inp     = ui.number("Durata (mesi)", value=12, min=1, step=1).classes("w-full").props("outlined dense")
-            dur_inp.style("background: var(--bg-inp); color: var(--txt);")
-            data_f_inp  = ui.date(value=date.today().isoformat()).props("outlined dense").classes("w-full")
-            data_f_inp.style("background: var(--bg-inp); color: var(--txt);")
-            giorno_f    = ui.number("Giorno scadenza", value=1, min=1, max=31, step=1).classes("w-full").props("outlined dense")
-            giorno_f.style("background: var(--bg-inp); color: var(--txt);")
-            rate_pag    = ui.number("Rate già pagate", value=0, min=0, step=1).classes("w-full").props("outlined dense")
-            rate_pag.style("background: var(--bg-inp); color: var(--txt);")
+            if "\_success_ric_ts" in st.session_state:
+                if datetime.now().timestamp() - st.session_state["_success_ric_ts"] < 3:
+                    st.success("✅ Spesa ricorrente eliminata.")
+                else:
+                    del st.session_state["_success_ric_ts"]
 
-        def salva_finanziamento():
-            nome = nome_inp.value.strip()
-            cap  = float(cap_inp.value or 0)
-            dur  = int(dur_inp.value or 0)
-            if not nome or cap <= 0 or dur <= 0:
-                ui.notify("Compila nome, capitale e durata.", type="warning")
-                return
-            try:
-                d_inizio = date.fromisoformat(data_f_inp.value) if isinstance(data_f_inp.value, str) else data_f_inp.value
-                db.aggiungi_finanziamento(
-                    nome, cap, float(taeg_inp.value or 0), dur,
-                    d_inizio, int(giorno_f.value or 1),
-                    rate_pagate=int(rate_pag.value or 0) or None,
-                    user_email=user_email,
-                )
-                ui.notify("✅ Finanziamento salvato!", type="positive")
-                ui.navigate.reload()
-            except Exception as exc:
-                ui.notify(f"Errore: {exc}", type="negative")
+    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-        ui.button("💾 Salva Finanziamento", on_click=salva_finanziamento).props("unelevated").style(
-            "background: var(--acc); color: #fff; font-weight: 600; margin-top: 8px;"
+    # ── 3. Finanziamenti ──────────────────────────────────────────────────────
+    with st.container(border=True):
+        n_fin = len(df_fin) if not df_fin.empty else 0
+        st.markdown(
+            f"""<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+  <span style="font-size:13px;font-weight:700;color:#dde6f5;">🏦 Finanziamenti</span>
+  <span style="font-size:10px;padding:3px 10px;border-radius:20px;background:rgba(79,142,240,0.12);
+               color:#82b4f7;border:1px solid rgba(79,142,240,0.28);">{n_fin} attivi</span>
+</div>""",
+            unsafe_allow_html=True,
         )
 
-        # Lista finanziamenti
-        if not df_fin.empty:
-            fin_rows_html = _build_fin_table_rows(df_fin, df_mov)
-            ui.html(scroll_table(
-                title="Elenco finanziamenti", right_html="",
-                columns=[("Nome","left"),("Capitale","right"),("TAEG","center"),("Durata","center"),("Rata","right"),("Residuo","right"),("% Compl.","center")],
-                widths=[1.8, 1.1, 0.8, 0.8, 1.1, 1.2, 0.9],
-                rows_html=fin_rows_html, height_px=260,
-            )).classes("w-full mt-3")
+        with st.form("form_finanziamento", clear_on_submit=False):
+            c1, c2, c3 = st.columns(3)
+            nome_fin  = c1.text_input("Nome finanziamento", key="fin_nome")
+            capitale  = c2.number_input("Capitale iniziale (€)", 0.0, step=0.1, format="%.2f", key="fin_capitale")
+            taeg      = c3.number_input("TAEG (%)", 0.0, step=0.01, key="fin_taeg")
+            c4, c5, c6, c7 = st.columns(4)
+            durata          = c4.number_input("Durata (mesi)", 1, step=1, key="fin_durata")
+            data_inizio_fin = c5.date_input("Data inizio", key="fin_data_inizio")
+            giorno_fin      = c6.number_input("Giorno scadenza", 1, 31, 1, 1, key="fin_giorno")
+            rate_gia_pag    = c7.number_input("Rate già pagate", 0, step=1, value=0, key="fin_rate")
 
-            # Elimina finanziamento
-            fin_options = {str(row["id"]): f"{row['nome']}" for _, row in df_fin.iterrows()}
-            with ui.row().classes("items-end gap-3 mt-3"):
-                sel_fin = ui.select(options=fin_options, label="Seleziona finanziamento da eliminare").classes("flex-1").props("outlined dense")
-                sel_fin.style("background: var(--bg-inp); color: var(--txt);")
-
-                confirm_fin_banner = ui.element("div").classes("w-full")
-
-                def richiedi_elimina_fin():
-                    confirm_fin_banner.set_visibility(True)
-
-                def conferma_elimina_fin():
+            if st.form_submit_button("💾 Salva Finanziamento"):
+                if nome_fin and capitale > 0 and durata > 0:
                     try:
-                        db.elimina_finanziamento(int(sel_fin.value), user_email=user_email)
-                        ui.notify("✅ Finanziamento eliminato.", type="positive")
-                        ui.navigate.reload()
+                        db.aggiungi_finanziamento(
+                            nome_fin, capitale, taeg, durata, data_inizio_fin,
+                            giorno_fin, rate_pagate=int(rate_gia_pag) or None,
+                            user_email=user_email,
+                        )
+                        invalidate_cache()
+                        for k in ["fin_nome", "fin_capitale", "fin_taeg", "fin_durata", "fin_rate", "fin_giorno"]:
+                            st.session_state.pop(k, None)
+                        st.success("✅ Finanziamento salvato!")
+                        st.rerun()
                     except Exception as exc:
-                        ui.notify(f"Errore: {exc}", type="negative")
+                        st.error(f"Errore: {exc}")
+                else:
+                    st.warning("Compila nome, capitale e durata.")
 
-                def annulla_elimina_fin():
-                    confirm_fin_banner.set_visibility(False)
-
-                ui.button("🗑️ Elimina", on_click=richiedi_elimina_fin).props("unelevated").style(
-                    "background: rgba(242,106,106,0.15); color: #f26a6a; border: 1px solid rgba(242,106,106,0.3);"
+        # Tabella finanziamenti esistenti
+        if not df_fin.empty:
+            fin_rows_html = []
+            for _, f in df_fin.iterrows():
+                dati_b   = log.calcolo_finanziamento(
+                    f["capitale_iniziale"], f["taeg"], f["durata_mesi"],
+                    f["data_inizio"], f["giorno_scadenza"],
                 )
+                rate_db  = int(f["rate_pagate"]) if "rate_pagate" in f.index and pd.notna(f["rate_pagate"]) else None
+                rate_mov = _mesi_pagati_da_mov(df_mov, f["nome"], dati_b["rata"], f["data_inizio"])
+                rate_cal = int(dati_b.get("mesi_pagati", 0))
+                vals_r   = [v for v in [rate_db, rate_mov, rate_cal] if v is not None]
+                rate_eff = max(vals_r) if vals_r else None
 
-            with confirm_fin_banner:
-                ui.html("<div style='color: var(--amber); font-size:0.85rem; margin:8px 0;'>⚠️ Operazione irreversibile. Confermi l'eliminazione?</div>")
-                with ui.row().classes("gap-3"):
-                    ui.button("🗑️ Sì, elimina", on_click=conferma_elimina_fin).props("unelevated").style("background: #f26a6a; color: #fff;")
-                    ui.button("Annulla", on_click=annulla_elimina_fin).props("flat").style("color: var(--txt-mid);")
-            confirm_fin_banner.set_visibility(False)
-
-
-def _build_fin_table_rows(df_fin: pd.DataFrame, df_mov: pd.DataFrame) -> list:
-    from pages.debiti import _mesi_pagati_da_mov
-    rows = []
-    for _, f in df_fin.iterrows():
-        dati_b  = log.calcolo_finanziamento(f["capitale_iniziale"], f["taeg"], f["durata_mesi"], f["data_inizio"], f["giorno_scadenza"])
-        rate_db = int(f["rate_pagate"]) if "rate_pagate" in f.index and pd.notna(f["rate_pagate"]) else None
-        rate_mov = _mesi_pagati_da_mov(df_mov, f["nome"], dati_b["rata"], f["data_inizio"])
-        rate_cal = int(dati_b.get("mesi_pagati", 0))
-        vals     = [v for v in [rate_db, rate_mov, rate_cal] if v is not None]
-        rate_eff = max(vals) if vals else None
-        dati     = log.calcolo_finanziamento(f["capitale_iniziale"], f["taeg"], f["durata_mesi"], f["data_inizio"], f["giorno_scadenza"], rate_pagate_override=rate_eff)
-
-        taeg_c = "#f5a623" if f["taeg"] > 5 else "#10d98a"
-        rows.append(_tr([
-            _td(f"<strong>{escape(str(f['nome']))}</strong>", color=Colors.TEXT, weight=600),
-            _td(eur2(f["capitale_iniziale"]),   color=Colors.TEXT,  mono=True, align="right"),
-            _td(f"{f['taeg']:.2f}%",            color=taeg_c,       mono=True, align="center"),
-            _td(str(f["durata_mesi"]),          color=Colors.TEXT_MID, mono=True, align="center"),
-            _td(eur2(dati["rata"]),             color=Colors.RED,   mono=True, weight=600, align="right"),
-            _td(eur2(dati["debito_residuo"]),   color=Colors.TEXT,  mono=True, align="right"),
-            _td(f"{dati['percentuale_completato']:.1f}%",
-                color=Colors.GREEN if dati['percentuale_completato'] >= 50 else Colors.AMBER,
-                mono=True, align="center"),
-        ]))
-    return rows
-
-
-# ---------------------------------------------------------------------------
-# 4. Storico Movimenti
-# ---------------------------------------------------------------------------
-
-def _render_storico_movimenti(user_email: str, data: dict) -> None:
-    df_mov = data["df_mov"]
-
-    with ui.card().classes("w-full").style(
-        "background: var(--bg-card); border: 1px solid var(--bdr); border-radius: 12px; padding: 20px;"
-    ):
-        ui.html("""<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
-  <span style="font-size:13px;font-weight:700;color:#dde6f5;">📋 Storico Movimenti</span>
-</div>""")
-
-        # Filtri
-        with ui.grid(columns=3).classes("w-full gap-3 mb-3"):
-            tipo_filter = ui.select(
-                options={"Tutti": "Tutti", "USCITA": "↑ Uscita", "ENTRATA": "↓ Entrata"},
-                value="Tutti", label="Tipo",
-            ).classes("w-full").props("outlined dense")
-            tipo_filter.style("background: var(--bg-inp); color: var(--txt);")
-
-            categorie_disp = sorted(df_mov["Categoria"].dropna().unique().tolist()) if not df_mov.empty else []
-            cat_filter = ui.select(
-                options=["Tutti"] + categorie_disp,
-                value="Tutti", label="Categoria",
-                multiple=True,
-            ).classes("w-full").props("outlined dense use-chips")
-            cat_filter.style("background: var(--bg-inp); color: var(--txt);")
-
-            anni_disp = ["Tutti"] + [str(a) for a in sorted(df_mov["Data"].dt.year.dropna().unique(), reverse=True)] if not df_mov.empty else ["Tutti"]
-            anno_filter = ui.select(options=anni_disp, value="Tutti", label="Anno").classes("w-full").props("outlined dense")
-            anno_filter.style("background: var(--bg-inp); color: var(--txt);")
-
-        table_container = ui.element("div").classes("w-full")
-
-        def refresh_table():
-            table_container.clear()
-            df_reg = df_mov.copy()
-            if tipo_filter.value and tipo_filter.value != "Tutti":
-                df_reg = df_reg[df_reg["Tipo"] == tipo_filter.value]
-            if cat_filter.value and "Tutti" not in (cat_filter.value or []):
-                df_reg = df_reg[df_reg["Categoria"].isin(cat_filter.value)]
-            if anno_filter.value and anno_filter.value != "Tutti":
-                df_reg = df_reg[df_reg["Data"].dt.year == int(anno_filter.value)]
-
-            df_reg = df_reg.copy()
-            df_reg.columns = [c.capitalize() for c in df_reg.columns]
-            if "Id" not in df_reg.columns and "id" in df_mov.columns:
-                df_reg["Id"] = df_mov.loc[df_reg.index, "id"]
-
-            TIPO_COLOR = {"ENTRATA": Colors.GREEN, "USCITA": Colors.RED}
-            CAT_COLOR_MAP = {
-                "NECESSITÀ":    ("#4f8ef0", "rgba(79,142,240,0.10)", "rgba(79,142,240,0.28)"),
-                "SVAGO":        ("#f472b6", "rgba(244,114,182,0.10)", "rgba(244,114,182,0.28)"),
-                "INVESTIMENTI": ("#10d98a", "rgba(16,217,138,0.10)", "rgba(16,217,138,0.28)"),
-                "ENTRATE":      ("#f5a623", "rgba(245,166,35,0.10)", "rgba(245,166,35,0.28)"),
-            }
-            mov_rows = []
-            for _, row in df_reg.iterrows():
-                tipo_v = str(row.get("Tipo", "")).upper()
-                cat_v  = str(row.get("Categoria", "")).upper()
-                cc, cbg, cbd = CAT_COLOR_MAP.get(cat_v, ("#82b4f7", "rgba(79,142,240,0.10)", "rgba(79,142,240,0.28)"))
-                mov_rows.append(_tr([
-                    _td(str(row.get("Id", "")),                color=Colors.TEXT_MID, mono=True),
-                    _td(str(row.get("Data", ""))[:10],         color=Colors.TEXT_MID, mono=True),
-                    _td(tipo_v,                                color=TIPO_COLOR.get(tipo_v, Colors.TEXT), weight=600),
-                    _td(chip_html(cat_v, cc, cbg, cbd),        nowrap=False),
-                    _td(escape(str(row.get("Dettaglio", ""))), color=Colors.TEXT),
-                    _td(format_eur(row.get("Importo", 0), 2),
-                        color=Colors.RED if tipo_v == "USCITA" else Colors.GREEN,
-                        mono=True, weight=600),
-                    _td(escape(str(row.get("Note", ""))),      color=Colors.TEXT_MID),
+                taeg_pct = f["taeg"]
+                taeg_c, taeg_bg, taeg_bd = (
+                    ("#f5a623", "rgba(245,166,35,0.10)", "rgba(245,166,35,0.26)") if taeg_pct > 5
+                    else ("#10d98a", "rgba(16,217,138,0.10)", "rgba(16,217,138,0.26)")
+                )
+                fin_rows_html.append(_tr([
+                    _td(f"<strong>{escape(str(f['nome']))}</strong>", color=Colors.TEXT, weight=600),
+                    _td(format_eur(f["capitale_iniziale"], 0), color=Colors.TEXT, mono=True),
+                    _td(chip_html(f"{taeg_pct:.2f}%", taeg_c, taeg_bg, taeg_bd), nowrap=False),
+                    _td(f"{int(f['durata_mesi'])}m",         color=Colors.TEXT_MID, mono=True, align="center"),
+                    _td(str(f["data_inizio"])[:10],          color=Colors.TEXT_MID, mono=True, align="center"),
+                    _td(format_eur(dati_b["rata"], 2),       color=Colors.RED,      mono=True, weight=600),
+                    _td(str(rate_eff or 0),                  color=Colors.TEXT_MID, mono=True, align="center"),
                 ]))
 
-            with table_container:
-                ui.html(scroll_table(
-                    title="Storico movimenti",
-                    right_html=f"{len(df_reg)} righe",
-                    columns=[("ID","left"),("Data","left"),("Tipo","left"),("Categoria","left"),("Dettaglio","left"),("Importo","left"),("Note","left")],
-                    widths=[0.45, 0.9, 0.9, 1.0, 1.7, 0.95, 1.3],
-                    rows_html=mov_rows, height_px=420,
-                    empty_message="Nessun movimento trovato con i filtri selezionati.",
-                )).classes("w-full")
+            try:
+                totale_rate = sum(
+                    log.calcolo_finanziamento(
+                        r["capitale_iniziale"], r["taeg"], r["durata_mesi"],
+                        r["data_inizio"], r["giorno_scadenza"],
+                    )["rata"]
+                    for _, r in df_fin.iterrows()
+                )
+                right_fin = f"{format_eur(totale_rate, 2)} / mese"
+            except Exception:
+                right_fin = ""
 
-                # Elimina movimento
-                if "Id" in df_reg.columns and not df_reg.empty:
-                    def label_mov(mid):
-                        rows = df_reg[df_reg.get("Id", pd.Series(dtype=int)) == mid] if "Id" in df_reg.columns else pd.DataFrame()
-                        if rows.empty:
-                            return str(mid)
-                        r = rows.iloc[0]
-                        return f"{str(r.get('Data',''))[:10]} | {r.get('Tipo','')} | {r.get('Categoria','')} | {format_eur(r.get('Importo',0), 2)}"
+            st.markdown(scroll_table(
+                title="Finanziamenti in corso", right_html=right_fin,
+                columns=[("Nome","left"),("Capitale","left"),("TAEG","left"),("Durata","center"),("Inizio","center"),("Rata","left"),("Rate pag.","center")],
+                widths=[1.8, 1.2, 0.9, 0.8, 1.1, 1.1, 0.9],
+                rows_html=fin_rows_html, height_px=280,
+            ), unsafe_allow_html=True)
 
-                    mov_id_opts = {str(mid): label_mov(mid) for mid in df_reg["Id"].tolist()}
+            col_sel_fin, col_btn_fin = st.columns([4, 1], vertical_alignment="bottom")
+            fin_nome = col_sel_fin.selectbox(
+                "Seleziona finanziamento da eliminare",
+                df_fin["nome"].tolist(),
+                format_func=lambda n: (
+                    f"{n} | {format_eur(df_fin.loc[df_fin['nome']==n].iloc[0]['capitale_iniziale'], 0)}"
+                    if not df_fin[df_fin["nome"]==n].empty else str(n)
+                ),
+                key="sel_del_fin",
+            )
+            if col_btn_fin.button("🗑️ Elimina", key="btn_del_fin", use_container_width=True):
+                st.session_state["pending_delete_fin"] = fin_nome
 
-                    with ui.row().classes("items-end gap-3 mt-3"):
-                        sel_mov = ui.select(options=mov_id_opts, label="Seleziona movimento da eliminare").classes("flex-1").props("outlined dense")
-                        sel_mov.style("background: var(--bg-inp); color: var(--txt);")
+            if st.session_state.get("pending_delete_fin") is not None:
+                fnome = st.session_state["pending_delete_fin"]
+                st.warning(f"⚠️ Elimina **{fnome}**? Operazione irreversibile.")
+                cc1, cc2 = st.columns(2)
+                if cc1.button("🗑️ Sì, elimina", key="confirm_del_fin", use_container_width=True, type="primary"):
+                    db.elimina_finanziamento(fnome, user_email=user_email)
+                    invalidate_cache()
+                    del st.session_state["pending_delete_fin"]
+                    st.session_state["_success_fin_ts"] = datetime.now().timestamp()
+                    st.rerun()
+                if cc2.button("Annulla", key="cancel_del_fin", use_container_width=True):
+                    del st.session_state["pending_delete_fin"]
+                    st.rerun()
 
-                        confirm_mov_banner = ui.element("div").classes("w-full")
+            if "_success_fin_ts" in st.session_state:
+                if datetime.now().timestamp() - st.session_state["_success_fin_ts"] < 3:
+                    st.success("✅ Finanziamento eliminato.")
+                else:
+                    del st.session_state["_success_fin_ts"]
 
-                        def richiedi_elimina_mov():
-                            confirm_mov_banner.set_visibility(True)
+    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-                        def conferma_elimina_mov():
-                            try:
-                                db.elimina_movimento(int(sel_mov.value), user_email)
-                                ui.notify("✅ Movimento eliminato con successo.", type="positive")
-                                ui.navigate.reload()
-                            except Exception as exc:
-                                ui.notify(f"Errore: {exc}", type="negative")
+    # ── 4. Storico Movimenti ──────────────────────────────────────────────────
+    with st.container(border=True):
+        st.markdown(
+            """<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+  <span style="font-size:13px;font-weight:700;color:#dde6f5;">📋 Storico Movimenti</span>
+</div>""",
+            unsafe_allow_html=True,
+        )
 
-                        def annulla_elimina_mov():
-                            confirm_mov_banner.set_visibility(False)
+        col_ft, col_fc, col_fa = st.columns([1.2, 2, 1])
+        filtro_tipo = col_ft.radio("Tipo", ["Tutti", "↑ Uscita", "↓ Entrata"], horizontal=True, key="reg_filtro_tipo")
+        categorie_disp = sorted(df_mov["Categoria"].dropna().unique().tolist()) if not df_mov.empty else []
+        filtro_cat  = col_fc.multiselect("Categoria", categorie_disp, key="reg_filtro_cat")
+        filtro_anno = (
+            col_fa.selectbox(
+                "Anno",
+                ["Tutti"] + [str(a) for a in sorted(df_mov["Data"].dt.year.dropna().unique(), reverse=True)],
+                key="reg_filtro_anno",
+            )
+            if not df_mov.empty else "Tutti"
+        )
 
-                        ui.button("🗑️ Elimina", on_click=richiedi_elimina_mov).props("unelevated").style(
-                            "background: rgba(242,106,106,0.15); color: #f26a6a; border: 1px solid rgba(242,106,106,0.3);"
-                        )
+        df_reg = df_mov.copy()
+        if filtro_tipo != "Tutti":
+            tipo_f = "USCITA" if "Uscita" in filtro_tipo else "ENTRATA"
+            df_reg = df_reg[df_reg["Tipo"] == tipo_f]
+        if filtro_cat:
+            df_reg = df_reg[df_reg["Categoria"].isin(filtro_cat)]
+        if filtro_anno != "Tutti":
+            df_reg = df_reg[df_reg["Data"].dt.year == int(filtro_anno)]
 
-                    with confirm_mov_banner:
-                        ui.html("<div style='color: var(--amber); font-size:0.85rem; margin:8px 0;'>⚠️ Operazione irreversibile. Confermi l'eliminazione?</div>")
-                        with ui.row().classes("gap-3"):
-                            ui.button("🗑️ Sì, elimina", on_click=conferma_elimina_mov).props("unelevated").style("background: #f26a6a; color: #fff;")
-                            ui.button("Annulla", on_click=annulla_elimina_mov).props("flat").style("color: var(--txt-mid);")
-                    confirm_mov_banner.set_visibility(False)
+        df_reg.columns = [c.capitalize() for c in df_reg.columns]
+        if "Id" not in df_reg.columns and "id" in df_mov.columns:
+            df_reg["Id"] = df_mov.loc[df_reg.index, "id"]
 
-        tipo_filter.on("update:model-value", lambda: refresh_table())
-        cat_filter.on("update:model-value", lambda: refresh_table())
-        anno_filter.on("update:model-value", lambda: refresh_table())
-        refresh_table()
+        TIPO_COLOR = {"ENTRATA": Colors.GREEN, "USCITA": Colors.RED}
+        CAT_COLOR  = {
+            "NECESSITÀ":    ("#4f8ef0",  "rgba(79,142,240,0.10)",  "rgba(79,142,240,0.28)"),
+            "SVAGO":        ("#f472b6",  "rgba(244,114,182,0.10)", "rgba(244,114,182,0.28)"),
+            "INVESTIMENTI": ("#10d98a",  "rgba(16,217,138,0.10)",  "rgba(16,217,138,0.28)"),
+            "ENTRATE":      ("#f5a623",  "rgba(245,166,35,0.10)",  "rgba(245,166,35,0.28)"),
+        }
 
+        def _label_mov(mid):
+            if "Id" not in df_reg.columns:
+                return str(mid)
+            rows = df_reg[df_reg["Id"] == mid]
+            if rows.empty:
+                return str(mid)
+            r = rows.iloc[0]
+            return f"{str(r.get('Data',''))[:10]} | {r.get('Tipo','')} | {r.get('Categoria','')} | {format_eur(r.get('Importo',0), 2)}"
 
-# ---------------------------------------------------------------------------
-# 5. Backup Dati
-# ---------------------------------------------------------------------------
+        mov_rows_html = []
+        for _, row in df_reg.iterrows():
+            tipo_v = str(row.get("Tipo", "")).upper()
+            cat_v  = str(row.get("Categoria", "")).upper()
+            cc, cbg, cbd = CAT_COLOR.get(cat_v, ("#82b4f7", "rgba(79,142,240,0.10)", "rgba(79,142,240,0.28)"))
+            mov_rows_html.append(_tr([
+                _td(str(row.get("Id", "")),             color=Colors.TEXT_MID, mono=True),
+                _td(str(row.get("Data", ""))[:10],      color=Colors.TEXT_MID, mono=True),
+                _td(tipo_v,                              color=TIPO_COLOR.get(tipo_v, Colors.TEXT), weight=600),
+                _td(chip_html(cat_v, cc, cbg, cbd),     nowrap=False),
+                _td(escape(str(row.get("Dettaglio", ""))), color=Colors.TEXT),
+                _td(format_eur(row.get("Importo", 0), 2),
+                    color=Colors.RED if tipo_v == "USCITA" else Colors.GREEN, mono=True, weight=600),
+                _td(escape(str(row.get("Note", ""))),   color=Colors.TEXT_MID),
+            ]))
 
-def _render_backup(user_email: str) -> None:
-    with ui.card().classes("w-full").style(
-        "background: var(--bg-card); border: 1px solid var(--bdr); border-radius: 12px; padding: 20px;"
-    ):
-        ui.html("""<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+        st.markdown(scroll_table(
+            title="Storico movimenti",
+            right_html=f"{len(df_reg)} righe",
+            columns=[("ID","left"),("Data","left"),("Tipo","left"),("Categoria","left"),
+                     ("Dettaglio","left"),("Importo","left"),("Note","left")],
+            widths=[0.45, 0.9, 0.9, 1.0, 1.7, 0.95, 1.3],
+            rows_html=mov_rows_html, height_px=420,
+            empty_message="Nessun movimento trovato con i filtri selezionati.",
+        ), unsafe_allow_html=True)
+
+        if "Id" in df_reg.columns and not df_reg.empty:
+            col_sm, col_bm = st.columns([4, 1], vertical_alignment="bottom")
+            mov_id = col_sm.selectbox(
+                "Seleziona movimento da eliminare",
+                df_reg["Id"].tolist(),
+                format_func=_label_mov,
+                key="sel_del_mov",
+            )
+            if col_bm.button("🗑️ Elimina", key="btn_del_mov", use_container_width=True):
+                st.session_state["pending_delete_mov"] = mov_id
+
+        if st.session_state.get("pending_delete_mov") is not None:
+            mid = st.session_state["pending_delete_mov"]
+            st.warning(f"⚠️ Stai per eliminare il movimento **{_label_mov(mid)}**. Operazione irreversibile.")
+            cc1, cc2 = st.columns(2)
+            if cc1.button("🗑️ Sì, elimina", key="confirm_del_mov", use_container_width=True, type="primary"):
+                db.elimina_movimento(mid, user_email)
+                invalidate_cache()
+                del st.session_state["pending_delete_mov"]
+                st.session_state["_success_mov_ts"] = datetime.now().timestamp()
+                st.rerun()
+            if cc2.button("Annulla", key="cancel_del_mov", use_container_width=True):
+                del st.session_state["pending_delete_mov"]
+                st.rerun()
+
+        if "_success_mov_ts" in st.session_state:
+            if datetime.now().timestamp() - st.session_state["_success_mov_ts"] < 3:
+                st.success("✅ Movimento eliminato con successo.")
+            else:
+                del st.session_state["_success_mov_ts"]
+
+    # ── 5. Backup Dati ────────────────────────────────────────────────────────
+    with st.container(border=True):
+        st.markdown(
+            """<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
   <span style="font-size:19px;font-weight:700;color:#dde6f5;">🗄️ Backup Dati</span>
-</div>""")
+</div>""",
+            unsafe_allow_html=True,
+        )
 
-        ui.html(
+        @st.cache_data(ttl=0, show_spinner=False)
+        def _genera_sql_backup(email: str) -> str | None:
+            from backup import genera_sql_per_utente
+            from config_runtime import get_secret
+            db_url = get_secret("DATABASE_URL") or get_secret("DATABASE_URL_POOLER")
+            if not db_url:
+                return None
+            try:
+                import psycopg2
+                conn   = psycopg2.connect(db_url)
+                cursor = conn.cursor()
+                sql    = genera_sql_per_utente(cursor, email)
+                cursor.close()
+                conn.close()
+                return sql
+            except Exception:
+                return None
+
+        sql_backup = _genera_sql_backup(user_email)
+        col_txt, col_btn = st.columns([3, 1], vertical_alignment="bottom")
+        col_txt.markdown(
             "<div style='font-size:0.90rem;color:#5a6f8c;line-height:1.7;'>"
-            "<p style='margin-bottom:4px;'>Scarica una <strong style='color:#dde6f5;'>copia completa</strong> dei tuoi dati in formato SQL.</p>"
-            "<p style='margin:0;'>Conservala in un posto sicuro — accessibile anche senza l'app.</p></div>"
+            "<p style='margin-bottom:4px;'>Scarica una <strong style='color:#dde6f5;'>copia completa</strong>"
+            " dei tuoi dati in formato SQL.</p>"
+            "<p style='margin:0;'>Conservala in un posto sicuro — accessibile anche senza l'app.</p></div>",
+            unsafe_allow_html=True,
         )
-
-        def genera_e_scarica():
-            sql = _genera_sql_backup(user_email)
-            if not sql:
-                ui.notify("Backup non disponibile. Controlla la connessione al database.", type="negative")
-                return
-            filename = f"personal_budget_backup_{datetime.now().strftime('%Y-%m-%d')}.sql"
-            ui.download(sql.encode("utf-8"), filename=filename)
-
-        ui.button("⬇ Scarica backup", on_click=genera_e_scarica).props("unelevated").style(
-            "background: var(--acc); color: #fff; font-weight: 600; margin-top: 8px;"
-        )
-
-
-def _genera_sql_backup(user_email: str):
-    from backup import genera_sql_per_utente
-    db_url = get_secret("DATABASE_URL") or get_secret("DATABASE_URL_POOLER")
-    if not db_url:
-        return None
-    try:
-        import psycopg2
-        conn   = psycopg2.connect(db_url)
-        cursor = conn.cursor()
-        sql    = genera_sql_per_utente(cursor, user_email)
-        cursor.close()
-        conn.close()
-        return sql
-    except Exception:
-        return None
+        if sql_backup:
+            col_btn.download_button(
+                label="⬇ Scarica backup",
+                data=sql_backup.encode("utf-8"),
+                file_name=f"personal_budget_backup_{datetime.now().strftime('%Y-%m-%d')}.sql",
+                mime="text/plain",
+                use_container_width=True,
+            )
+        else:
+            col_btn.caption("Backup non disponibile (DATABASE_URL mancante).")

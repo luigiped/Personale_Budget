@@ -38,7 +38,6 @@ def format_eur(value, decimals: int = 0, signed: bool = False) -> str:
 
     return f"{sign}€ {s}"
 
-
 def eur0(value, signed: bool = False) -> str:
     """Valuta senza decimali: € 1.234"""
     return format_eur(value, decimals=0, signed=signed)
