@@ -294,6 +294,14 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
             creato_il       TIMESTAMPTZ DEFAULT NOW()
         )""",
     ]),
+    (6, "Aggiunta user_email e FK a notifiche_scadenze", [
+    "ALTER TABLE notifiche_scadenze ADD COLUMN IF NOT EXISTS user_email TEXT",
+    "UPDATE notifiche_scadenze SET user_email = LOWER(TRIM(destinatario)) WHERE user_email IS NULL AND destinatario IS NOT NULL",
+    "DELETE FROM notifiche_scadenze n WHERE user_email IS NOT NULL AND NOT EXISTS (SELECT 1 FROM utenti_registrati u WHERE LOWER(TRIM(u.email)) = LOWER(TRIM(n.user_email)))",
+    "ALTER TABLE notifiche_scadenze DROP CONSTRAINT IF EXISTS fk_notifiche_scadenze_user_email",
+    "ALTER TABLE notifiche_scadenze ADD CONSTRAINT fk_notifiche_scadenze_user_email FOREIGN KEY (user_email) REFERENCES utenti_registrati(email) ON DELETE CASCADE",
+    "CREATE INDEX IF NOT EXISTS idx_notifiche_scadenze_user_email ON notifiche_scadenze (user_email)",
+]),
 ]
 
 
@@ -349,8 +357,9 @@ def inizializza_db() -> None:
                 data_inizio DATE, data_fine DATE, user_email TEXT)""")
 
             cursor.execute("""CREATE TABLE IF NOT EXISTS notifiche_scadenze (
-                id SERIAL PRIMARY KEY, chiave_evento TEXT UNIQUE, destinatario TEXT,
-                data_scadenza DATE, inviato_il TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+            id SERIAL PRIMARY KEY, chiave_evento TEXT UNIQUE, destinatario TEXT,
+            data_scadenza DATE, inviato_il TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            user_email TEXT)""")
 
             cursor.execute("""CREATE TABLE IF NOT EXISTS utenti_notifiche (
                 email TEXT PRIMARY KEY, attivo BOOLEAN DEFAULT TRUE,
@@ -581,13 +590,23 @@ def recupera_totale_per_categoria(categoria: str, user_email: str) -> float:
 # Notifiche e sessioni
 # ---------------------------------------------------------------------------
 
-def registra_notifica_scadenza(chiave_evento: str, destinatario: str, data_scadenza=None) -> None:
+def registra_notifica_scadenza(
+    chiave_evento: str,
+    destinatario: str,
+    data_scadenza=None,
+    user_email: str | None = None,
+) -> None:
+    destinatario_norm = str(destinatario).strip().lower() if destinatario else None
+    user_email_norm = str(user_email).strip().lower() if user_email else destinatario_norm
+
     with connetti_db() as conn:
         with conn.cursor() as cursor:
             cursor.execute(
-                "INSERT INTO notifiche_scadenze (chiave_evento, destinatario, data_scadenza) "
-                "VALUES (%s, %s, %s) ON CONFLICT (chiave_evento) DO NOTHING",
-                (chiave_evento, destinatario, data_scadenza),
+                "INSERT INTO notifiche_scadenze "
+                "(chiave_evento, destinatario, data_scadenza, user_email) "
+                "VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (chiave_evento) DO NOTHING",
+                (chiave_evento, destinatario_norm, data_scadenza, user_email_norm),
             )
 
 
