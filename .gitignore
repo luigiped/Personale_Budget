@@ -1,11 +1,42 @@
+# ── Ambiente Python ──────────────────────────────────────────────────────────
 .env
+.env.*
 __pycache__/
-*.pyc
-token/
+*.py[cod]
+*.pyo
+*.pyd
+# ── Ambienti virtuali ────────────────────────────────────────────────────────
 .venv/
+venv/
+env/
+ENV/
+# ── Streamlit ────────────────────────────────────────────────────────────────
 .streamlit/
-*.sql
+# ── Token OAuth / credenziali ────────────────────────────────────────────────
+token/
 *.json
+token_sistema.json
+# ── Backup SQL (generati dall'app) ───────────────────────────────────────────
+*.sql
+# ── Editor / OS ──────────────────────────────────────────────────────────────
 .DS_Store
+Thumbs.db
 .vscode/
 .idea/
+# ── Log ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+# ── Build / distribuzione Python ─────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
+*.egg
+MANIFEST
+# ── Test / coverage ──────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+# ── Jupyter ──────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
