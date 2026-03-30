@@ -16,4 +16,9 @@ ENV PORT=8080
 EXPOSE 8080
 
 # Comando per avviare la tua app Streamlit
-CMD ["streamlit", "run", "interfaccia.py", "--server.port=8080", "--server.address=0.0.0.0"]
+CMD ["streamlit", "run", "interfaccia.py", \
+     "--server.port=8080", \
+     "--server.address=0.0.0.0", \
+     "--server.headless=true", \
+     "--server.enableCORS=false", \
+     "--server.enableXsrfProtection=false"]
