@@ -1,7 +1,7 @@
 # Personal Budget Dashboard — dipendenze NiceGUI
 
 # ── Core framework ────────────────────────────────────────────────────────────
-nicegui>=1.4.21
+streamlit>=1.30.0
 
 # ── Database ──────────────────────────────────────────────────────────────────
 psycopg2-binary>=2.9
