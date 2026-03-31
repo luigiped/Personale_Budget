@@ -1,3 +1,4 @@
+#r streamlit run interfaccia.py
 import time
 import base64
 import json
