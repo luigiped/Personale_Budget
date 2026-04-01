@@ -15,6 +15,8 @@ Novità rispetto alla versione precedente:
 """
 
 import logging
+import random
+import string
 import os
 import re
 import threading
@@ -302,6 +304,20 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
     "ALTER TABLE notifiche_scadenze ADD CONSTRAINT fk_notifiche_scadenze_user_email FOREIGN KEY (user_email) REFERENCES utenti_registrati(email) ON DELETE CASCADE",
     "CREATE INDEX IF NOT EXISTS idx_notifiche_scadenze_user_email ON notifiche_scadenze (user_email)",
 ]),
+    (7, "Creazione tabella password_reset_tokens", [
+    """CREATE TABLE IF NOT EXISTS password_reset_tokens (
+        id          SERIAL PRIMARY KEY,
+        email       TEXT NOT NULL
+                        REFERENCES utenti_registrati(email)
+                        ON DELETE CASCADE,
+        otp         TEXT NOT NULL,
+        expires_at  TIMESTAMPTZ NOT NULL,
+        used        BOOLEAN DEFAULT FALSE,
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_prt_email ON password_reset_tokens (email)",
+    "CREATE INDEX IF NOT EXISTS idx_prt_expires ON password_reset_tokens (expires_at)",
+])
 ]
 
 
@@ -653,6 +669,217 @@ def lista_destinatari_notifiche() -> list[str]:
                 pass
     return sorted(destinatari)
 
+# ---------------------------------------------------------------------------
+# Reset password token management
+# ---------------------------------------------------------------------------
+def email_utente_esiste(email: str) -> bool:
+    """
+    Restituisce True se l'email è registrata in utenti_registrati.
+    Usata prima di generare un OTP per non rivelare indirizzi inesistenti
+    nel messaggio di errore (sicurezza: rispondi sempre "se esiste, riceverai…").
+    """
+    if not email:
+        return False
+    email_norm = str(email).strip().lower()
+    try:
+        with connetti_db() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT 1 FROM utenti_registrati WHERE email = %s LIMIT 1",
+                    (email_norm,),
+                )
+                return cursor.fetchone() is not None
+    except Exception as exc:
+        logger.error("email_utente_esiste: %s", exc)
+        return False
+ 
+ 
+def crea_reset_token(email: str, ttl_minuti: int = 15) -> str | None:
+    """
+    Genera un OTP numerico a 6 cifre, lo salva nel DB con scadenza
+    `ttl_minuti` e restituisce l'OTP in chiaro (da inviare via email).
+ 
+    Prima di inserire il nuovo token, invalida tutti i token precedenti
+    non ancora scaduti per la stessa email (evita accumulo).
+ 
+    Restituisce None in caso di errore.
+    """
+    if not email:
+        return None
+    email_norm = str(email).strip().lower()
+    otp = "".join(random.choices(string.digits, k=6))
+ 
+    try:
+        with connetti_db() as conn:
+            with conn.cursor() as cursor:
+                # Invalida i token precedenti ancora attivi
+                cursor.execute(
+                    "UPDATE password_reset_tokens SET used = TRUE "
+                    "WHERE email = %s AND used = FALSE AND expires_at > NOW()",
+                    (email_norm,),
+                )
+                # Inserisce il nuovo token
+                cursor.execute(
+                    "INSERT INTO password_reset_tokens (email, otp, expires_at) "
+                    "VALUES (%s, %s, NOW() + INTERVAL '%s minutes')",
+                    (email_norm, otp, ttl_minuti),
+                )
+        logger.info("Reset token creato per %s (scade in %d min).", email_norm, ttl_minuti)
+        return otp
+    except Exception as exc:
+        logger.error("crea_reset_token: %s", exc)
+        return None
+ 
+ 
+def verifica_e_consuma_token(email: str, otp: str) -> bool:
+    """
+    Verifica che l'OTP sia valido (corretto, non scaduto, non già usato)
+    e lo marca come 'used = TRUE' in modo atomico.
+ 
+    Restituisce True solo se tutto è corretto.
+    """
+    if not email or not otp:
+        return False
+    email_norm = str(email).strip().lower()
+    otp_clean = str(otp).strip()
+ 
+    try:
+        with connetti_db() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE password_reset_tokens
+                    SET    used = TRUE
+                    WHERE  email      = %s
+                      AND  otp        = %s
+                      AND  used       = FALSE
+                      AND  expires_at > NOW()
+                    """,
+                    (email_norm, otp_clean),
+                )
+                return cursor.rowcount == 1
+    except Exception as exc:
+        logger.error("verifica_e_consuma_token: %s", exc)
+        return False
+ 
+ 
+def aggiorna_password_hash(email: str, nuovo_hash: str) -> bool:
+    """
+    Aggiorna il campo password_hash in utenti_registrati.
+    Da chiamare SOLO dopo aver verificato con successo il token OTP.
+ 
+    Restituisce True se la riga è stata aggiornata, False altrimenti.
+    """
+    if not email or not nuovo_hash:
+        return False
+    email_norm = str(email).strip().lower()
+ 
+    try:
+        with connetti_db() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE utenti_registrati SET password_hash = %s WHERE email = %s",
+                    (nuovo_hash, email_norm),
+                )
+                return cursor.rowcount == 1
+    except Exception as exc:
+        logger.error("aggiorna_password_hash: %s", exc)
+        return False
+
+# ---------------------------------------------------------------------------
+# Eliminazione account utente e dati collegati
+# ---------------------------------------------------------------------------
+
+def elimina_account_utente(email: str) -> dict:
+    """
+    Elimina l'account utente e TUTTI i dati collegati nel DB.
+ 
+    Ordine di eliminazione (rispetta le FK):
+      1. movimenti           — user_email (no FK, manuale)
+      2. asset_settings      — user_email (no FK, manuale)
+      3. finanziamenti       — user_email (no FK, manuale)
+      4. spese_ricorrenti    — user_email (no FK, manuale)
+      5. active_sessions     — user_email (no FK, manuale)
+      6. utenti_notifiche    — email PK   (no FK, manuale)
+      7. utenti_registrati   — email PK   (CASCADE su notifiche_scadenze
+                                           e password_reset_tokens)
+ 
+    Restituisce un dizionario con il conteggio delle righe eliminate
+    per tabella, utile per il log e l'eventuale UI di conferma.
+    Solleva un'eccezione in caso di errore — il chiamante decide come gestirla.
+    """
+    if not email:
+        raise ValueError("Email non fornita.")
+ 
+    email_norm = str(email).strip().lower()
+    conteggio: dict[str, int] = {}
+ 
+    with connetti_db() as conn:
+        with conn.cursor() as cursor:
+ 
+            # 1. movimenti
+            cursor.execute(
+                "DELETE FROM movimenti WHERE LOWER(TRIM(user_email)) = %s",
+                (email_norm,),
+            )
+            conteggio["movimenti"] = cursor.rowcount
+ 
+            # 2. asset_settings
+            cursor.execute(
+                "DELETE FROM asset_settings WHERE LOWER(TRIM(user_email)) = %s",
+                (email_norm,),
+            )
+            conteggio["asset_settings"] = cursor.rowcount
+ 
+            # 3. finanziamenti
+            cursor.execute(
+                "DELETE FROM finanziamenti WHERE LOWER(TRIM(user_email)) = %s",
+                (email_norm,),
+            )
+            conteggio["finanziamenti"] = cursor.rowcount
+ 
+            # 4. spese_ricorrenti
+            cursor.execute(
+                "DELETE FROM spese_ricorrenti WHERE LOWER(TRIM(user_email)) = %s",
+                (email_norm,),
+            )
+            conteggio["spese_ricorrenti"] = cursor.rowcount
+ 
+            # 5. active_sessions
+            cursor.execute(
+                "DELETE FROM active_sessions WHERE LOWER(TRIM(user_email)) = %s",
+                (email_norm,),
+            )
+            conteggio["active_sessions"] = cursor.rowcount
+ 
+            # 6. utenti_notifiche (PK = email, nessuna FK verso utenti_registrati)
+            cursor.execute(
+                "DELETE FROM utenti_notifiche WHERE LOWER(TRIM(email)) = %s",
+                (email_norm,),
+            )
+            conteggio["utenti_notifiche"] = cursor.rowcount
+ 
+            # 7. utenti_registrati — CASCADE elimina automaticamente:
+            #    - notifiche_scadenze (FK ON DELETE CASCADE)
+            #    - password_reset_tokens (FK ON DELETE CASCADE)
+            cursor.execute(
+                "DELETE FROM utenti_registrati WHERE LOWER(TRIM(email)) = %s",
+                (email_norm,),
+            )
+            conteggio["utenti_registrati"] = cursor.rowcount
+ 
+    # Invalida tutte le cache per questo utente
+    _cache_movimenti.invalidate(email_norm)
+    _cache_spese.invalidate(email_norm)
+    _cache_finanziamenti.invalidate(email_norm)
+    _cache_pac.invalidate(email_norm)
+ 
+    logger.info(
+        "Account eliminato: %s — righe rimosse: %s",
+        email_norm,
+        ", ".join(f"{t}={n}" for t, n in conteggio.items()),
+    )
+    return conteggio
 
 # ---------------------------------------------------------------------------
 # Import CSV
