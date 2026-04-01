@@ -670,5 +670,338 @@ div[data-testid="stRadio"] > div[role="radiogroup"]:has(label:nth-child(3)) > la
 }
 """
 
+# ---------------------------------------------------------------------------
+# CSS_LOGIN — Aurora / Glassmorphism  (fix v2: column-targeting, no div wrap)
+# ---------------------------------------------------------------------------
+CSS_LOGIN = """
+
+/* ─── Keyframes ──────────────────────────────────────────────────────────── */
+@keyframes aurora-float-a {
+    0%,100% { transform: scale(1)    translate(0px, 0px);   }
+    33%      { transform: scale(1.08) translate(22px,-28px); }
+    66%      { transform: scale(0.95) translate(-10px,18px); }
+}
+@keyframes aurora-float-b {
+    0%,100% { transform: scale(1)    translate(0px,0px);   }
+    33%      { transform: scale(0.92) translate(-20px,24px); }
+    66%      { transform: scale(1.06) translate(16px,-14px); }
+}
+@keyframes aurora-float-c {
+    0%,100% { transform: scale(1)    translate(0px,0px);  }
+    50%      { transform: scale(1.12) translate(18px,12px); }
+}
+@keyframes login-card-in {
+    from { opacity:0; transform: translateY(28px) scale(0.97); }
+    to   { opacity:1; transform: translateY(0)    scale(1);    }
+}
+@keyframes login-item-in {
+    from { opacity:0; transform: translateY(10px); }
+    to   { opacity:1; transform: translateY(0);    }
+}
+@keyframes aurora-shimmer {
+    0%   { background-position: 200% center; }
+    100% { background-position:-200% center; }
+}
+@keyframes badge-breathe {
+    0%,100% { opacity:1;    }
+    50%      { opacity:0.45; }
+}
+@keyframes pulse-ring {
+    0%   { box-shadow: 0 0 0 0   rgba(139,92,246,0.45); }
+    70%  { box-shadow: 0 0 0 10px rgba(139,92,246,0.00); }
+    100% { box-shadow: 0 0 0 0   rgba(139,92,246,0.00); }
+}
+
+/* ─── Header / toolbar — colore aurora ──────────────────────────────────── */
+body:has(.login-aurora-bg) [data-testid="stHeader"],
+body:has(.login-aurora-bg) header[data-testid="stHeader"] {
+    background: rgba(6,1,15,0.82) !important;
+    backdrop-filter: blur(12px) !important;
+    border-bottom: 1px solid rgba(139,92,246,0.18) !important;
+}
+body:has(.login-aurora-bg) [data-testid="stToolbar"],
+body:has(.login-aurora-bg) [data-testid="stDecoration"] {
+    background: transparent !important;
+}
+
+/* ─── Sidebar nascosta nella pagina login ────────────────────────────────── */
+body:has(.login-aurora-bg) [data-testid="stSidebar"],
+body:has(.login-aurora-bg) [data-testid="collapsedControl"] {
+    display: none !important;
+}
+
+/* ─── Sfondo aurora fullscreen ───────────────────────────────────────────── */
+.login-aurora-bg {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    background:
+        radial-gradient(ellipse 80% 50% at 15% 20%, rgba(88,28,220,0.22) 0%, transparent 60%),
+        radial-gradient(ellipse 60% 45% at 85% 75%, rgba(219,39,119,0.18) 0%, transparent 55%),
+        radial-gradient(ellipse 70% 55% at 50% 50%, rgba(30,58,138,0.15) 0%, transparent 65%),
+        #06010f;
+    overflow: hidden;
+    pointer-events: none;
+}
+.login-aurora-bg::after {
+    content: '';
+    position: absolute; inset: 0;
+    background-image: radial-gradient(rgba(255,255,255,0.05) 1px, transparent 1px);
+    background-size: 28px 28px;
+    pointer-events: none;
+}
+
+/* ─── Blob animati ────────────────────────────────────────────────────────── */
+.login-orb {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(60px);
+    pointer-events: none;
+    will-change: transform;
+}
+.login-orb-1 {
+    width:520px; height:520px; top:-130px; left:-110px;
+    background: radial-gradient(circle, rgba(139,92,246,0.55) 0%, transparent 65%);
+    animation: aurora-float-a 10s ease-in-out infinite;
+}
+.login-orb-2 {
+    width:440px; height:440px; bottom:-110px; right:-90px;
+    background: radial-gradient(circle, rgba(236,72,153,0.45) 0%, transparent 65%);
+    animation: aurora-float-b 13s ease-in-out infinite;
+}
+.login-orb-3 {
+    width:320px; height:320px; top:38%; left:42%;
+    background: radial-gradient(circle, rgba(59,130,246,0.28) 0%, transparent 65%);
+    animation: aurora-float-c 8s ease-in-out infinite;
+}
+
+/* ─── CARD: si targettizza la colonna centrale di Streamlit ──────────────── */
+/*  st.columns([1, 1.4, 1])  →  :nth-child(2)                               */
+body:has(.login-aurora-bg)
+  [data-testid="stMain"]
+  [data-testid="stHorizontalBlock"]
+  [data-testid="column"]:nth-child(2)
+  > [data-testid="stVerticalBlock"] {
+    position: relative;
+    z-index: 10;
+    background: rgba(255,255,255,0.055) !important;
+    border: 1px solid rgba(255,255,255,0.13) !important;
+    border-radius: 24px !important;
+    padding: 2.4rem 2rem 2rem !important;
+    backdrop-filter: blur(24px) saturate(160%) !important;
+    -webkit-backdrop-filter: blur(24px) saturate(160%) !important;
+    box-shadow:
+        0 32px 80px rgba(0,0,0,0.60),
+        0  1px  0   rgba(255,255,255,0.08) inset,
+        0 -1px  0   rgba(255,255,255,0.04) inset !important;
+    animation: login-card-in 0.65s cubic-bezier(0.22,1,0.36,1) both !important;
+    overflow: hidden;
+}
+/* Striscia gradiente animata in cima alla card */
+body:has(.login-aurora-bg)
+  [data-testid="stMain"]
+  [data-testid="stHorizontalBlock"]
+  [data-testid="column"]:nth-child(2)
+  > [data-testid="stVerticalBlock"]::before {
+    content: '';
+    display: block;
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    border-radius: 24px 24px 0 0;
+    background: linear-gradient(90deg, #7c3aed, #ec4899, #3b82f6, #7c3aed);
+    background-size: 200% auto;
+    animation: aurora-shimmer 4s linear infinite;
+    z-index: 2;
+}
+
+/* Stagger fade-in degli elementi della card */
+body:has(.login-aurora-bg)
+  [data-testid="stMain"]
+  [data-testid="stHorizontalBlock"]
+  [data-testid="column"]:nth-child(2)
+  > [data-testid="stVerticalBlock"]
+  > * {
+    animation: login-item-in 0.5s ease both;
+}
+body:has(.login-aurora-bg) [data-testid="column"]:nth-child(2) > [data-testid="stVerticalBlock"] > *:nth-child(1) { animation-delay:.08s; }
+body:has(.login-aurora-bg) [data-testid="column"]:nth-child(2) > [data-testid="stVerticalBlock"] > *:nth-child(2) { animation-delay:.14s; }
+body:has(.login-aurora-bg) [data-testid="column"]:nth-child(2) > [data-testid="stVerticalBlock"] > *:nth-child(3) { animation-delay:.20s; }
+body:has(.login-aurora-bg) [data-testid="column"]:nth-child(2) > [data-testid="stVerticalBlock"] > *:nth-child(4) { animation-delay:.25s; }
+body:has(.login-aurora-bg) [data-testid="column"]:nth-child(2) > [data-testid="stVerticalBlock"] > *:nth-child(5) { animation-delay:.29s; }
+body:has(.login-aurora-bg) [data-testid="column"]:nth-child(2) > [data-testid="stVerticalBlock"] > *:nth-child(6) { animation-delay:.33s; }
+
+/* ─── Logo / badge / heading — testi ─────────────────────────────────────── */
+.login-logo-row {
+    display: flex; align-items: center; gap: 13px;
+    margin-bottom: 1.4rem;
+}
+.login-logo-icon {
+    width:46px; height:46px; border-radius:13px; flex-shrink:0;
+    background: linear-gradient(135deg, #7c3aed 0%, #ec4899 100%);
+    display:flex; align-items:center; justify-content:center;
+    font-size:22px;
+    box-shadow: 0 6px 24px rgba(139,92,246,0.45);
+    animation: pulse-ring 3.5s ease infinite;
+}
+.login-logo-name {
+    font-size: 1.18rem !important; font-weight: 700 !important;
+    color: #f0e8ff !important;
+    margin: 0 !important; padding: 0 !important; line-height: 1.2 !important;
+    letter-spacing: -0.01em !important;
+}
+.login-logo-tagline {
+    font-size: 0.74rem !important;
+    color: rgba(220,200,255,0.45) !important;
+    margin: 2px 0 0 !important; padding: 0 !important;
+}
+.login-status-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 0.70rem; font-weight: 600;
+    padding: 3px 12px; border-radius: 20px;
+    background: rgba(139,92,246,0.14);
+    color: #c4b5fd;
+    border: 1px solid rgba(139,92,246,0.30);
+    margin-bottom: 1.2rem; letter-spacing: 0.03em;
+}
+.login-status-dot {
+    width:6px; height:6px; border-radius:50%;
+    background:#a78bfa;
+    animation: badge-breathe 2.2s ease-in-out infinite;
+}
+.login-heading {
+    font-size: 1.55rem !important; font-weight: 700 !important;
+    color: #f0e8ff !important; letter-spacing: -0.02em !important;
+    margin: 0 0 3px !important; padding: 0 !important; line-height: 1.15 !important;
+}
+.login-subheading {
+    font-size: 0.81rem !important;
+    color: rgba(200,180,255,0.48) !important;
+    margin: 0 0 1.2rem !important; padding: 0 !important;
+}
+
+/* ─── TAB — pill style (alta specificità per battere CSS_BASE) ────────────── */
+body:has(.login-aurora-bg) .stTabs [data-baseweb="tab-list"] {
+    background: rgba(255,255,255,0.06) !important;
+    border: 1px solid rgba(255,255,255,0.10) !important;
+    border-bottom: 1px solid rgba(255,255,255,0.10) !important;
+    border-radius: 10px !important;
+    padding: 3px !important;
+    gap: 2px !important;
+    margin-bottom: 1.2rem !important;
+}
+body:has(.login-aurora-bg) .stTabs [data-baseweb="tab"] {
+    border-radius: 8px !important;
+    font-size: 0.83rem !important;
+    font-weight: 600 !important;
+    padding: 6px 20px !important;
+    height: auto !important;
+    color: rgba(200,180,255,0.48) !important;
+    border-bottom: none !important;
+    border: none !important;
+    background: transparent !important;
+    transition: background 0.2s, color 0.2s !important;
+}
+body:has(.login-aurora-bg) .stTabs [data-baseweb="tab"]:hover {
+    background: rgba(139,92,246,0.08) !important;
+    color: rgba(220,200,255,0.75) !important;
+}
+body:has(.login-aurora-bg) .stTabs [aria-selected="true"] {
+    background: linear-gradient(135deg, rgba(124,58,237,0.60), rgba(236,72,153,0.42)) !important;
+    color: #f0e8ff !important;
+    border-bottom: none !important;
+    box-shadow: 0 2px 12px rgba(139,92,246,0.30) !important;
+}
+/* Nasconde la barra rossa/blu underline default */
+body:has(.login-aurora-bg) .stTabs [data-baseweb="tab-highlight"],
+body:has(.login-aurora-bg) .stTabs [data-baseweb="tab-border"] {
+    display: none !important;
+    background: transparent !important;
+    height: 0 !important;
+}
+
+/* ─── Label input ─────────────────────────────────────────────────────────── */
+body:has(.login-aurora-bg) [data-testid="stTextInput"] label p {
+    font-size: 0.72rem !important; font-weight: 600 !important;
+    letter-spacing: 0.09em !important; text-transform: uppercase !important;
+    color: rgba(200,180,255,0.55) !important;
+}
+
+/* ─── Input field ─────────────────────────────────────────────────────────── */
+body:has(.login-aurora-bg) [data-testid="stTextInput"] > div > div,
+body:has(.login-aurora-bg) [data-testid="stTextInput"] input {
+    background: rgba(255,255,255,0.06) !important;
+    border: 1px solid rgba(255,255,255,0.12) !important;
+    border-radius: 10px !important;
+    color: #f0e8ff !important;
+    font-size: 0.88rem !important;
+    transition: border-color 0.2s, box-shadow 0.2s !important;
+}
+body:has(.login-aurora-bg) [data-testid="stTextInput"] input::placeholder {
+    color: rgba(200,180,255,0.28) !important;
+}
+body:has(.login-aurora-bg) [data-testid="stTextInput"] input:focus {
+    border-color: rgba(139,92,246,0.65) !important;
+    box-shadow: 0 0 0 3px rgba(139,92,246,0.18) !important;
+    background: rgba(255,255,255,0.09) !important;
+}
+body:has(.login-aurora-bg) [data-testid="stTextInput"] button {
+    color: rgba(200,180,255,0.50) !important;
+    background: transparent !important;
+}
+
+/* ─── Bottone primario "Accedi" ───────────────────────────────────────────── */
+body:has(.login-aurora-bg) div.stButton > button[kind="primary"],
+body:has(.login-aurora-bg) div.stButton > button[data-testid="baseButton-primary"] {
+    background: linear-gradient(135deg, #7c3aed 0%, #a855f7 45%, #ec4899 100%) !important;
+    background-size: 200% auto !important;
+    border: none !important;
+    border-radius: 11px !important;
+    color: #fff !important;
+    font-weight: 700 !important;
+    font-size: 0.88rem !important;
+    letter-spacing: 0.03em !important;
+    box-shadow: 0 6px 28px rgba(139,92,246,0.42) !important;
+    transition: transform 0.15s, box-shadow 0.15s !important;
+    filter: none !important;
+}
+body:has(.login-aurora-bg) div.stButton > button[kind="primary"]:hover,
+body:has(.login-aurora-bg) div.stButton > button[data-testid="baseButton-primary"]:hover {
+    transform: translateY(-2px) !important;
+    box-shadow: 0 10px 36px rgba(139,92,246,0.58) !important;
+    filter: none !important;
+}
+
+/* ─── Bottoni secondari (Google, Password dimenticata) ────────────────────── */
+body:has(.login-aurora-bg) div.stButton > button[kind="secondary"],
+body:has(.login-aurora-bg) div.stButton > button[data-testid="baseButton-secondary"] {
+    background: rgba(255,255,255,0.06) !important;
+    border: 1px solid rgba(255,255,255,0.13) !important;
+    border-radius: 11px !important;
+    color: rgba(200,180,255,0.68) !important;
+    font-size: 0.83rem !important;
+}
+body:has(.login-aurora-bg) div.stButton > button[kind="secondary"]:hover,
+body:has(.login-aurora-bg) div.stButton > button[data-testid="baseButton-secondary"]:hover {
+    background: rgba(139,92,246,0.13) !important;
+    border-color: rgba(139,92,246,0.48) !important;
+    color: #e0d4ff !important;
+}
+
+/* ─── Divider ─────────────────────────────────────────────────────────────── */
+body:has(.login-aurora-bg) [data-testid="stDivider"] hr,
+body:has(.login-aurora-bg) hr {
+    border-color: rgba(255,255,255,0.10) !important;
+}
+
+/* ─── Alert / warning ─────────────────────────────────────────────────────── */
+body:has(.login-aurora-bg) [data-testid="stAlert"] {
+    background: rgba(139,92,246,0.10) !important;
+    border: 1px solid rgba(139,92,246,0.28) !important;
+    border-radius: 10px !important;
+    color: #ddd6fe !important;
+}
+"""
+
 # Tutto il CSS in un unico blocco (uso rapido in Streamlit)
-CSS_ALL = CSS_BASE + CSS_COMPONENTS + CSS_TAB_METRICS + CSS_REGISTRO
+CSS_ALL = CSS_BASE + CSS_COMPONENTS + CSS_TAB_METRICS + CSS_REGISTRO + CSS_LOGIN
