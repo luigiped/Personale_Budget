@@ -11,7 +11,12 @@ venv/
 env/
 ENV/
 # ── Streamlit ────────────────────────────────────────────────────────────────
-.streamlit/
+**/.streamlit/*
+# Esclude solo i file di configurazione, ma non l'intera cartella (per mantenere la struttura)
+!**/.streamlit/config.toml
+
+# Non caricare   secrets.toml, che potrebbe contenere credenziali sensibili
+**/.streamlit/secrets.toml
 # ── Token OAuth / credenziali ────────────────────────────────────────────────
 token/
 *.json
@@ -40,3 +45,5 @@ htmlcov/
 # ── Jupyter ──────────────────────────────────────────────────────────────────
 .ipynb_checkpoints/
 *.ipynb
+# ── secret_Outh_demo ──────────────────────────────────────────────────────────
+secret_Outh_demo/
