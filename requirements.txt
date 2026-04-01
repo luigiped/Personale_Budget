@@ -31,4 +31,3 @@ google-api-python-client>=2.120
 python-dateutil>=2.9
 flask>=2.3
 gunicorn>=20.1
-string>=1.0
