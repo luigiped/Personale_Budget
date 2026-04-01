@@ -1,4 +1,4 @@
-#r streamlit run interfaccia.py
+# streamlit run interfaccia.py
 import time
 import base64
 import json
@@ -18,7 +18,7 @@ from config_runtime import (
 )
  
 export_runtime_env()
-client_id, client_secret = load_google_oauth_credentials()
+GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET = load_google_oauth_credentials()
 APP_BASE_URL = default_base_url()
  
 try:
@@ -34,6 +34,7 @@ from auth_manager import (
     create_session, validate_session, delete_session,
     login_email_password, register_user, get_display_name,
     AuthError, AccessDeniedError, SESSION_TOKEN_COOKIE,
+    request_password_reset, confirm_password_reset,delete_user_account,
 )
  
 from utils.styles import CSS_ALL
@@ -61,7 +62,8 @@ TOKEN_URL = "https://oauth2.googleapis.com/token"
 # ---------------------------------------------------------------------------
 # Configurazione pagina (deve essere prima di qualsiasi st.*)
 # ---------------------------------------------------------------------------
-st.set_page_config(page_title="Personal Budget Dashboard", layout="wide", page_icon="💰")
+st.set_page_config(page_title="Personal Budget Dashboard", layout="wide", page_icon="💰",
+    initial_sidebar_state="collapsed" )
 
 
 # Nasconde la navigazione automatica della cartella pages/ dalla sidebar Streamlit.
@@ -262,70 +264,259 @@ def _decode_id_token_email(id_token) -> str | None:
 def _render_login_screen() -> None:
     mode = auth_access_mode()
  
+    # Sidebar già nascosta via CSS_LOGIN (.login-aurora-bg :has rule)
+ 
+    # ── Sfondo aurora + blob animati (iniettato fuori dalla colonna) ────────
     st.markdown("""
-<style>
-    [data-testid="stSidebarNav"] { padding-top: 1rem !important; }
-    .stSidebar [data-testid="stVerticalBlock"] { gap: 0.5rem !important; }
-
-    /* Omogeneità Selectbox Registro (Grigio come richiesto) */
-    div[data-baseweb="select"] > div {
-        background-color: #1e293b !important; /* Grigio scuro coerente */
-        border: 1px solid #334155 !important;
-    }
-</style>
-""", unsafe_allow_html=True)
+        <div class='login-aurora-bg'>
+            <div class='login-orb login-orb-1'></div>
+            <div class='login-orb login-orb-2'></div>
+            <div class='login-orb login-orb-3'></div>
+        </div>
+    """, unsafe_allow_html=True)
  
     _, center, _ = st.columns([1, 1.4, 1])
     with center:
-        st.markdown("<h1 class='login-title'>💰 Personal Budget</h1>", unsafe_allow_html=True)
-        st.markdown("<p class='login-subtitle'>Accedi per esplorare la dashboard</p>", unsafe_allow_html=True)
+        # ── Apre la card glassmorphism ───────────────────────────────────
+        st.markdown("<div class='login-glass-card'>", unsafe_allow_html=True)
  
+        # Logo row + badge stato
+        st.markdown("""
+            <div class='login-logo-row'>
+                <div class='login-logo-icon'>💰</div>
+                <div>
+                    <p class='login-logo-name'>Personal Budget</p>
+                    <p class='login-logo-tagline'>Gestione finanze personali</p>
+                </div>
+            </div>
+            <div class='login-status-badge'>
+                <span class='login-status-dot'></span>Servizio attivo
+            </div>
+        """, unsafe_allow_html=True)
+ 
+        # Titolo / sottotitolo
+        st.markdown("<h2 class='login-heading'>Bentornato</h2>", unsafe_allow_html=True)
+        st.markdown("<p class='login-subheading'>Accedi per esplorare la dashboard</p>", unsafe_allow_html=True)
+ 
+        # ── CLOSED: nessun tab, nessuna azione ───────────────────────────────
         if mode == "closed":
             st.warning("Accesso disabilitato. Riprova quando il servizio sarà riattivato.")
             return
  
-        if IS_DEMO:
-            user_flows_disabled = (mode == "demo_only")
-            tab_login, tab_register, tab_demo = st.tabs(["🔑 Accedi", "📝 Registrati", "🚀 Demo"])
+        user_flows_disabled = (mode == "demo_only")
  
-            with tab_login:
-                if user_flows_disabled:
-                    st.info("Login utenti temporaneamente disattivato. Usa la tab Demo.")
+        # ── COSTRUZIONE TAB: Demo appare solo se IS_DEMO è attivo ─────────────
+        tab_labels = ["🔑 Accedi", "📝 Registrati"]
+        if IS_DEMO:
+            tab_labels.append("🚀 Demo")
+ 
+        tabs = st.tabs(tab_labels)
+        tab_login    = tabs[0]
+        tab_register = tabs[1]
+        tab_demo     = tabs[2] if IS_DEMO else None
+ 
+        # ── TAB ACCEDI ────────────────────────────────────────────────────────
+        with tab_login:
+            reset_step = st.session_state.get("_pwd_reset_step")
+ 
+            # STEP 0: form di login normale
+            if reset_step is None:
                 email_in = st.text_input("Email", key="login_email", disabled=user_flows_disabled)
                 pwd_in   = st.text_input("Password", type="password", key="login_pwd", disabled=user_flows_disabled)
+ 
                 if st.button("Accedi", use_container_width=True, key="btn_login", disabled=user_flows_disabled):
                     if email_in and pwd_in:
                         try:
                             email_norm, token, expiry = login_email_password(email_in, pwd_in)
-                            st.session_state["session_token"] = token
-                            st.session_state["auth_user_email"] = email_norm
-                            _set_cookie(SESSION_TOKEN_COOKIE, token, expires_at=expiry)
-                            st.success("Accesso effettuato!")
-                            st.rerun()
-                        except AuthError as exc:
-                            st.error(str(exc))
+                            if _do_login(email_norm):
+                                _set_cookie(SESSION_TOKEN_COOKIE, token, expiry)
+                                st.rerun()
+                        except (AuthError, AccessDeniedError) as e:
+                            st.error(str(e))
                     else:
                         st.warning("Inserisci email e password.")
  
-            with tab_register:
-                if user_flows_disabled:
-                    st.info("Registrazione temporaneamente disattivata. Usa la tab Demo.")
-                nome_reg  = st.text_input("Nome",              key="reg_nome",  disabled=user_flows_disabled)
-                email_reg = st.text_input("Email",             key="reg_email", disabled=user_flows_disabled)
-                pwd_reg   = st.text_input("Password",          type="password", key="reg_pwd",  disabled=user_flows_disabled)
-                pwd_reg2  = st.text_input("Conferma password", type="password", key="reg_pwd2", disabled=user_flows_disabled)
-                if st.button("Registrati", use_container_width=True, key="btn_register", disabled=user_flows_disabled):
-                    if not email_reg or not pwd_reg:
-                        st.warning("Compila email e password.")
-                    elif pwd_reg != pwd_reg2:
+                st.markdown("<div style='text-align:right; margin-top:4px;'>", unsafe_allow_html=True)
+                if st.button(
+                    "🔑 Password dimenticata?",
+                    key="btn_forgot_pwd",
+                    disabled=user_flows_disabled,
+                    help="Riceverai un codice via email per reimpostare la password",
+                ):
+                    st.session_state["_pwd_reset_step"] = "request"
+                    st.session_state.pop("_pwd_reset_email", None)
+                    st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+ 
+                # ── GOOGLE OAUTH (sempre presente nel tab Accedi, fuori da IS_DEMO) ──
+                if not IS_DEMO:
+                    st.divider()
+                    if OAuth2Component is None:
+                        st.error("Modulo mancante: installa `streamlit-oauth`.")
+                    elif not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+                        st.error("Credenziali OAuth mancanti.")
+                    else:
+                        login_clicked = st.button(
+                            "Accedi con Google",
+                            key="google_login_custom",
+                            use_container_width=True,
+                        )
+                        oauth2 = OAuth2Component(
+                            GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+                            AUTHORIZE_URL, TOKEN_URL, TOKEN_URL, ""
+                        )
+                        if login_clicked:
+                            st.session_state["oauth_auto_click"] = True
+                            st.rerun()
+ 
+                        auto_click   = bool(st.session_state.pop("oauth_auto_click", False))
+                        redirect_uri = _redirect_uri()
+                        if not redirect_uri:
+                            st.error("APP_BASE_URL non configurato.")
+                        else:
+                            result = oauth2.authorize_button(
+                                name="Accedi con Google",
+                                scope="openid email profile",
+                                redirect_uri=redirect_uri,
+                                key="google_login_hidden",
+                                auto_click=auto_click,
+                                use_container_width=True,
+                                extras_params={"prompt": "select_account"},
+                            )
+                            if result:
+                                id_token = result.get("id_token")
+                                if not id_token and isinstance(result.get("token"), dict):
+                                    id_token = result["token"].get("id_token")
+                                email_google = _decode_id_token_email(id_token)
+                                if not email_google:
+                                    acc = result.get("access_token") or (result.get("token") or {}).get("access_token")
+                                    if acc:
+                                        from urllib.request import Request, urlopen
+                                        try:
+                                            req = Request(
+                                                "https://openidconnect.googleapis.com/v1/userinfo",
+                                                headers={"Authorization": f"Bearer {acc}"},
+                                            )
+                                            with urlopen(req, timeout=15) as resp:
+                                                payload = json.loads(resp.read())
+                                                email_google = str(payload.get("email", "")).strip().lower() or None
+                                        except Exception:
+                                            pass
+                                if email_google and _do_login(email_google):
+                                    try:
+                                        st.query_params.clear()
+                                    except Exception:
+                                        pass
+                                    st.success("Accesso autorizzato.")
+                                    st.rerun()
+                                if not email_google:
+                                    st.error("Impossibile leggere l'email dal profilo Google.")
+ 
+            # STEP 1: inserisci email per reset
+            elif reset_step == "request":
+                st.markdown(
+                    "<p style='color:#5a8dee;font-weight:600;margin-bottom:6px;'>"
+                    "🔐 Reimposta la tua password</p>",
+                    unsafe_allow_html=True,
+                )
+                st.caption(
+                    "Inserisci l'email del tuo account. "
+                    "Se è registrata, riceverai un codice a 6 cifre valido per 15 minuti."
+                )
+                reset_email = st.text_input(
+                    "Email account", key="reset_email_input",
+                    placeholder="es. mario@example.com", disabled=user_flows_disabled,
+                )
+                col_send, col_back = st.columns([3, 1])
+                if col_send.button("📨 Invia codice", use_container_width=True, key="btn_send_otp", disabled=user_flows_disabled):
+                    if not reset_email:
+                        st.warning("Inserisci l'email.")
+                    else:
+                        with st.spinner("Invio codice in corso…"):
+                            ok, msg = request_password_reset(reset_email)
+                        if ok:
+                            st.session_state["_pwd_reset_email"] = reset_email.strip().lower()
+                            st.session_state["_pwd_reset_step"]  = "confirm"
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                if col_back.button("← Indietro", key="btn_reset_back1", use_container_width=True):
+                    st.session_state.pop("_pwd_reset_step", None)
+                    st.session_state.pop("_pwd_reset_email", None)
+                    st.rerun()
+ 
+            # STEP 2: inserisci OTP + nuova password
+            elif reset_step == "confirm":
+                saved_email = st.session_state.get("_pwd_reset_email", "")
+                st.markdown(
+                    "<p style='color:#5a8dee;font-weight:600;margin-bottom:6px;'>"
+                    "🔐 Reimposta la tua password</p>",
+                    unsafe_allow_html=True,
+                )
+                st.caption(
+                    f"Abbiamo inviato un codice a **{saved_email}**. "
+                    "Controlla anche la cartella spam. Il codice scade in **15 minuti**."
+                )
+                otp_in   = st.text_input("Codice ricevuto via email (6 cifre)", key="reset_otp_input", max_chars=6, placeholder="123456", disabled=user_flows_disabled)
+                pwd_new  = st.text_input("Nuova password",         type="password", key="reset_new_pwd",  disabled=user_flows_disabled)
+                pwd_new2 = st.text_input("Conferma nuova password",type="password", key="reset_new_pwd2", disabled=user_flows_disabled)
+                col_confirm, col_back2 = st.columns([3, 1])
+                if col_confirm.button("✅ Conferma nuova password", use_container_width=True, key="btn_confirm_reset", type="primary", disabled=user_flows_disabled):
+                    if not otp_in or not pwd_new or not pwd_new2:
+                        st.warning("Compila tutti i campi.")
+                    elif pwd_new != pwd_new2:
                         st.error("Le password non coincidono.")
                     else:
-                        try:
-                            register_user(email_reg, pwd_reg, nome_reg)
-                            st.success("Registrazione completata! Ora accedi dalla tab 'Accedi'.")
-                        except AuthError as exc:
-                            st.error(str(exc))
+                        with st.spinner("Aggiornamento in corso…"):
+                            ok, msg = confirm_password_reset(saved_email, otp_in, pwd_new)
+                        if ok:
+                            st.session_state["_pwd_reset_step"] = "done"
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                if col_back2.button("← Indietro", key="btn_reset_back2", use_container_width=True):
+                    st.session_state["_pwd_reset_step"] = "request"
+                    st.rerun()
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("📨 Non ho ricevuto il codice — Rinvia", key="btn_resend_otp", disabled=user_flows_disabled):
+                    with st.spinner("Nuovo codice in invio…"):
+                        ok, msg = request_password_reset(saved_email)
+                    if ok:
+                        st.success("Nuovo codice inviato! Controlla la posta.")
+                    else:
+                        st.error(msg)
  
+            # STEP 3: successo
+            elif reset_step == "done":
+                st.success("✅ Password aggiornata con successo!")
+                st.caption("Hai ricevuto una email di conferma. Ora puoi accedere con la tua nuova password.")
+                if st.button("🔑 Torna al login", use_container_width=True, key="btn_back_to_login"):
+                    for k in ("_pwd_reset_step", "_pwd_reset_email"):
+                        st.session_state.pop(k, None)
+                    st.rerun()
+ 
+        # ── TAB REGISTRATI ────────────────────────────────────────────────────
+        with tab_register:
+            if user_flows_disabled:
+                st.info("Registrazione temporaneamente disattivata. Usa la tab Demo.")
+            nome_reg  = st.text_input("Nome",              key="reg_nome",  disabled=user_flows_disabled)
+            email_reg = st.text_input("Email",             key="reg_email", disabled=user_flows_disabled)
+            pwd_reg   = st.text_input("Password",          type="password", key="reg_pwd",  disabled=user_flows_disabled)
+            pwd_reg2  = st.text_input("Conferma password", type="password", key="reg_pwd2", disabled=user_flows_disabled)
+            if st.button("Registrati", use_container_width=True, key="btn_register", disabled=user_flows_disabled):
+                if not email_reg or not pwd_reg:
+                    st.warning("Compila email e password.")
+                elif pwd_reg != pwd_reg2:
+                    st.error("Le password non coincidono.")
+                else:
+                    try:
+                        register_user(email_reg, pwd_reg, nome_reg)
+                        st.success("Registrazione completata! Ora accedi dalla tab 'Accedi'.")
+                    except AuthError as exc:
+                        st.error(str(exc))
+ 
+        # ── TAB DEMO (solo se IS_DEMO) ────────────────────────────────────────
+        if tab_demo is not None:
             with tab_demo:
                 st.markdown(
                     "<p style='color:rgba(230,238,249,0.7);font-size:0.9rem;'>"
@@ -339,64 +530,9 @@ def _render_login_screen() -> None:
                             st.rerun()
                     else:
                         st.error("Credenziali demo non configurate nei secrets.")
-        else:
-            # Produzione: solo Google OAuth
-            if OAuth2Component is None:
-                st.error("Modulo mancante: installa `streamlit-oauth`.")
-                st.stop()
-            if not client_id or not client_secret:
-                st.error("Credenziali OAuth mancanti.")
-                st.stop()
  
-            login_clicked = st.button("Accedi con Google", key="google_login_custom", use_container_width=True)
-            oauth2 = OAuth2Component(client_id, client_secret, AUTHORIZE_URL, TOKEN_URL, TOKEN_URL, "")
-            if login_clicked:
-                st.session_state["oauth_auto_click"] = True
-                st.rerun()
- 
-            auto_click = bool(st.session_state.pop("oauth_auto_click", False))
-            redirect_uri = _redirect_uri()
-            if not redirect_uri:
-                st.error("APP_BASE_URL non configurato.")
-                st.stop()
- 
-            result = oauth2.authorize_button(
-                name="Accedi con Google",
-                scope="openid email profile",
-                redirect_uri=redirect_uri,
-                key="google_login_hidden",
-                auto_click=auto_click,
-                use_container_width=True,
-                extras_params={"prompt": "select_account"},
-            )
-            if result:
-                id_token = result.get("id_token")
-                if not id_token and isinstance(result.get("token"), dict):
-                    id_token = result["token"].get("id_token")
-                email_google = _decode_id_token_email(id_token)
-                if not email_google:
-                    acc = result.get("access_token") or (result.get("token") or {}).get("access_token")
-                    if acc:
-                        from urllib.request import Request, urlopen
-                        try:
-                            req = Request(
-                                "https://openidconnect.googleapis.com/v1/userinfo",
-                                headers={"Authorization": f"Bearer {acc}"},
-                            )
-                            with urlopen(req, timeout=15) as resp:
-                                payload = json.loads(resp.read())
-                                email_google = str(payload.get("email", "")).strip().lower() or None
-                        except Exception:
-                            pass
-                if email_google and _do_login(email_google):
-                    try:
-                        st.query_params.clear()
-                    except Exception:
-                        pass
-                    st.success("Accesso autorizzato.")
-                    st.rerun()
-                if not email_google:
-                    st.error("Impossibile leggere l'email dal profilo Google.")
+        # ── Chiude il div login-glass-card ──────────────────────────────
+        st.markdown("</div>", unsafe_allow_html=True)
  
     st.stop()
  
@@ -455,7 +591,7 @@ if "Categoria" in df_mov:
     df_mov["Categoria"] = df_mov["Categoria"].astype(str).str.upper().str.strip()
  
 if df_mov.empty:
-    st.warning("Nessun movimento trovato. Usa il tab Registro per aggiungere movimenti.")
+    st.warning("Nessun dato inserito. Usa il tab 'impostazioni rapide' per settare i tuoi dati, e 'Registro' per iniziare a tracciare i tuoi movimenti.")
  
 df_fin_db = db.carica_finanziamenti(user_email)
  
@@ -629,8 +765,8 @@ with st.sidebar.expander("Impostazioni rapide", expanded=False):
         risp_prev           = st.number_input(f"Risparmio anno prec. ({prev_year}) €", 0.0, value=s_num_candidates(risp_prev_candidates, 0.0), step=100.0)
         saldo_iniziale_set  = st.number_input(f"Saldo iniziale {anno_sel} (€)", 0.0, value=s_num_candidates(saldo_iniziale_candidates, 0.0), step=100.0)
         budget_base_set     = st.number_input("Budget mensile base (€)", 0.0, value=s_num("budget_mensile_base", 0.0), step=50.0)
-        saldo_fineco_set    = st.number_input("Saldo Fineco (€)", 0.0, value=s_num("saldo_fineco", 25995.0), step=50.0)
-        saldo_revolut_set   = st.number_input("Saldo Revolut (€)", 0.0, value=s_num("saldo_revolut", 2400.0), step=50.0)
+        saldo_fineco_set    = st.number_input("Saldo Conto Prin. (€)", 0.0, value=s_num("saldo_fineco", 0), step=50.0)
+        saldo_revolut_set   = st.number_input("Saldo Conto Sec. (€)", 0.0, value=s_num("saldo_revolut", 0), step=50.0)
         pac_quote_set       = st.number_input("Quote PAC", 0, value=int(s_num("pac_quote", 0)), step=1)
         pac_capitale_base_set = st.number_input("Capitale PAC investito (€)", 0.0, value=s_num("pac_capitale_investito", 0.0), step=10.0)
         pac_vers_set        = st.number_input("Versamento mensile PAC (€)", 0.0, value=s_num("pac_versamento_mensile", 80.0), step=10.0)
@@ -639,7 +775,7 @@ with st.sidebar.expander("Impostazioni rapide", expanded=False):
         fondo_quote_set     = st.number_input("Quote Fondo Pensione", 0.0, value=s_num("fondo_quote", 0.0), step=1.0)
         fondo_capitale_base_set = st.number_input("Capitale Fondo investito (€)", 0.0, value=s_num("fondo_capitale_investito", 0.0), step=10.0)
         fondo_vers_set      = st.number_input("Versamento mensile Fondo (€)", 0.0, value=s_num("fondo_versamento_mensile", 50.0), step=10.0)
-        fondo_quota_set     = st.number_input("Valore quota Fondo", 0.0, value=s_num("fondo_valore_quota", 7.28), step=0.01, format="%.4f")
+        fondo_quota_set     = st.number_input("Valore quota Fondo", 0.0, value=s_num("fondo_valore_quota", 0), step=0.01, format="%.4f")
         aliq_irpef_set      = st.number_input("Aliquota IRPEF (0-1)", 0.0, 1.0, s_num("aliquota_irpef", 0.26), 0.01, format="%.2f")
         fondo_rend_set      = st.number_input("Rendimento Fondo stimato (%)", 0.0, value=s_num("fondo_rendimento_stimato", 5.0), step=0.5)
         fondo_tfr_set       = st.number_input("TFR versato anno (€)", 0.0, value=s_num("fondo_tfr_versato_anno", 0.0), step=100.0)
@@ -714,16 +850,84 @@ if not df_budget.empty:
         )
 else:
     st.sidebar.caption("Nessun dato budget disponibile.")
+
+# ── Eliminazione account — sidebar ────────────────────────────────────────────
+st.sidebar.markdown("<hr style='border:0;border-top:1px solid rgba(92,118,178,0.18);margin:18px 0 14px;'>", unsafe_allow_html=True)
+ 
+if not is_demo_account:
+    del_step = st.session_state.get("_del_account_step")
+ 
+    # STEP 0: bottone iniziale
+    if del_step is None:
+        if st.sidebar.button(
+            "🗑️ Elimina account",
+            key="btn_sidebar_del_start",
+            use_container_width=True,
+        ):
+            st.session_state["_del_account_step"] = "confirm"
+            st.rerun()
+ 
+    # STEP 1: conferma con password
+    elif del_step == "confirm":
+        st.sidebar.warning("⚠️ Operazione irreversibile. Inserisci la password per confermare.")
+        pwd_confirm = st.sidebar.text_input(
+            "Password",
+            type="password",
+            key="del_account_pwd_sidebar",
+        )
+        col_ok, col_no = st.sidebar.columns(2)
+        if col_ok.button("Continua →", key="btn_sidebar_del_ok", use_container_width=True, type="primary"):
+            if not pwd_confirm:
+                st.sidebar.error("Inserisci la password.")
+            else:
+                from security import verify_password as _vp
+                try:
+                    with db.connetti_db() as _conn:
+                        with _conn.cursor() as _cur:
+                            _cur.execute(
+                                "SELECT password_hash FROM utenti_registrati WHERE email = %s",
+                                (user_email,),
+                            )
+                            _row = _cur.fetchone()
+                except Exception:
+                    _row = None
+ 
+                if not _row or not _vp(pwd_confirm, _row[0]):
+                    st.sidebar.error("Password non corretta.")
+                else:
+                    st.session_state["_del_account_step"] = "reconfirm"
+                    st.rerun()
+ 
+        if col_no.button("Annulla", key="btn_sidebar_del_cancel1", use_container_width=True):
+            st.session_state.pop("_del_account_step", None)
+            st.rerun()
+ 
+    # STEP 2: ultima conferma
+    elif del_step == "reconfirm":
+        st.sidebar.error(f"Elimini **{user_email}** e tutti i suoi dati. Impossibile recuperarli.")
+        col_yes, col_no = st.sidebar.columns(2)
+        if col_yes.button("🗑️ Sì, elimina", key="btn_sidebar_del_final", use_container_width=True, type="primary"):
+            try:
+                db.elimina_account_utente(user_email)
+                _delete_cookie(SESSION_TOKEN_COOKIE)
+                for k in list(st.session_state.keys()):
+                    del st.session_state[k]
+                st.rerun()
+            except Exception as exc:
+                st.sidebar.error(f"Errore: {exc}")
+        if col_no.button("No, annulla", key="btn_sidebar_del_cancel2", use_container_width=True):
+            st.session_state.pop("_del_account_step", None)
+            st.rerun()
  
 # ---------------------------------------------------------------------------
 # Header principale
 # ---------------------------------------------------------------------------
  
 st.markdown(
-    f"<div style='font-family:\"Plus Jakarta Sans\",sans-serif;font-size:0.95rem;"
+    f"<div style='font-family:\"Plus Jakarta Sans\",sans-serif;font-size:0.99rem;"
     f"font-weight:700;letter-spacing:2px;text-transform:uppercase;"
     f"color:{Colors.TEXT_MID};margin-bottom:10px;'>"
-    f"{NOME_DISPLAY} — {MONTH_NAMES.get(mese_sel, mese_sel)} {anno_sel}</div>",
+    f" PERSONAL BUDGET - {MONTH_NAMES.get(mese_sel, mese_sel)} {anno_sel}</div>",
     unsafe_allow_html=True,
 )
  
