@@ -994,7 +994,7 @@ body:has(.login-aurora-bg) hr {
     border-color: rgba(255,255,255,0.10) !important;
 }
 
-/* ─── Alert / warning ─────────────────────────────────────────────────────── */
+/* ─── Alert / warning ────────────────────────────────────────────────────── */
 body:has(.login-aurora-bg) [data-testid="stAlert"] {
     background: rgba(139,92,246,0.10) !important;
     border: 1px solid rgba(139,92,246,0.28) !important;
