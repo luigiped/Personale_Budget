@@ -7,7 +7,7 @@ Questo modulo implementa la logica di autenticazione indipendentemente dal
 framework UI.
 Gestisce esclusivamente:
   - Creazione / verifica / cancellazione sessioni nel DB
-  - Login email+password (con migrazione automatica SHA-256 → bcrypt)
+  - Login email+password (con migrazione automatica SHA-256 → bcrypt) e recupero password
   - Registrazione utenti
   - Modalità accesso (normal / demo_only / closed)
 
@@ -29,6 +29,7 @@ from datetime import datetime, timedelta, timezone
 import Database as db
 from config_runtime import auth_access_mode, get_secret
 from security import hash_password, needs_rehash, verify_password
+from gmail_sender import send_email
 
 logger = logging.getLogger(__name__)
 
@@ -383,3 +384,192 @@ def get_display_name(email: str, is_demo_account: bool = False) -> str:
     except Exception as exc:
         logger.debug("get_display_name: %s", exc)
     return default
+
+
+# ---------------------------------------------------------------------------
+# Gestione reset password
+# ---------------------------------------------------------------------------
+
+logger = logging.getLogger(__name__)
+ 
+# Requisiti minimi password (coerenti con register_user esistente)
+_MIN_PWD_LEN = 8
+ 
+ 
+def _email_otp_body(otp: str, ttl_minuti: int = 15) -> str:
+    """Corpo HTML dell'email con il codice OTP."""
+    return (
+        "<div style='font-family: sans-serif; color: #333; max-width: 480px;'>"
+        "<h2 style='color:#4f8ef0;'>🔐 Reset Password — Personal Budget</h2>"
+        "<p>Hai richiesto il reset della password.<br>"
+        "Usa il codice qui sotto nell'app entro "
+        f"<strong>{ttl_minuti} minuti</strong>:</p>"
+        "<div style='font-size:2.2rem;font-weight:700;letter-spacing:0.3rem;"
+        "color:#1a1a2e;background:#f0f4ff;border-radius:10px;"
+        f"padding:18px 28px;display:inline-block;margin:16px 0;'>{otp}</div>"
+        "<p style='color:#888;font-size:0.85rem;'>"
+        "Se non sei stato tu a richiedere il reset, ignora questa email.<br>"
+        "La tua password rimane invariata.</p>"
+        "<hr style='border:0;border-top:1px solid #eee;margin:20px 0;'>"
+        "<small style='color:#aaa;'>Personal Budget — assistente automatico 🤖</small>"
+        "</div>"
+    )
+ 
+ 
+def _email_conferma_body(email: str) -> str:
+    """Corpo HTML dell'email di conferma avvenuto reset."""
+    return (
+        "<div style='font-family: sans-serif; color: #333; max-width: 480px;'>"
+        "<h2 style='color:#10d98a;'>✅ Password aggiornata</h2>"
+        f"<p>La password dell'account <strong>{email}</strong> è stata "
+        "aggiornata con successo.</p>"
+        "<p>Puoi ora accedere con la tua nuova password.</p>"
+        "<p style='color:#e05c5c;font-size:0.88rem;'>"
+        "⚠️ Se non hai eseguito questa operazione, contatta subito "
+        "il supporto o accedi e cambia nuovamente la password.</p>"
+        "<hr style='border:0;border-top:1px solid #eee;margin:20px 0;'>"
+        "<small style='color:#aaa;'>Personal Budget — assistente automatico 🤖</small>"
+        "</div>"
+    )
+ 
+ 
+def request_password_reset(email: str) -> tuple[bool, str]:
+    """
+    Avvia il flusso di reset password:
+      1. Controlla che l'email esista (senza rivelarlo all'utente per sicurezza)
+      2. Genera un OTP a 6 cifre con scadenza 15 minuti
+      3. Invia l'OTP via email
+ 
+    Restituisce (True, messaggio_ok) oppure (False, messaggio_errore).
+ 
+    Nota di sicurezza: in caso di email inesistente restituisce comunque
+    True con lo stesso messaggio, per non rivelare quali email sono registrate.
+    """
+    if not email:
+        return False, "Inserisci un indirizzo email."
+ 
+    email_norm = str(email).strip().lower()
+ 
+    # Controllo silenzioso: se l'email non esiste, facciamo finta di niente
+    esiste = db.email_utente_esiste(email_norm)
+ 
+    if not esiste:
+        # Risposta generica per non rivelare se l'account esiste
+        logger.info("Reset richiesto per email inesistente: %s", email_norm)
+        return True, "Se l'indirizzo è registrato, riceverai un'email con il codice."
+ 
+    otp = db.crea_reset_token(email_norm, ttl_minuti=15)
+    if not otp:
+        logger.error("Impossibile creare token reset per %s", email_norm)
+        return False, "Errore interno. Riprova tra qualche minuto."
+ 
+    ok, msg = send_email(
+        email_norm,
+        "🔐 Codice di reset password — Personal Budget",
+        _email_otp_body(otp, ttl_minuti=15),
+    )
+    if not ok:
+        logger.error("Invio OTP fallito per %s: %s", email_norm, msg)
+        return False, f"Errore nell'invio dell'email: {msg}"
+ 
+    logger.info("OTP reset inviato a %s.", email_norm)
+    return True, "Se l'indirizzo è registrato, riceverai un'email con il codice."
+ 
+ 
+def confirm_password_reset(email: str, otp: str, nuova_password: str) -> tuple[bool, str]:
+    """
+    Conferma il reset password:
+      1. Valida i requisiti della nuova password
+      2. Verifica l'OTP (valido, non scaduto, non usato) e lo consuma
+      3. Aggiorna il password_hash in DB
+      4. Invia email di conferma
+ 
+    Restituisce (True, messaggio_ok) oppure (False, messaggio_errore).
+    """
+    if not email or not otp or not nuova_password:
+        return False, "Tutti i campi sono obbligatori."
+ 
+    email_norm = str(email).strip().lower()
+    otp_clean = str(otp).strip()
+ 
+    # ── Validazione password ──────────────────────────────────────────────
+    if len(nuova_password) < _MIN_PWD_LEN:
+        return False, f"La password deve essere di almeno {_MIN_PWD_LEN} caratteri."
+ 
+    # ── Verifica OTP (atomico nel DB) ─────────────────────────────────────
+    valido = db.verifica_e_consuma_token(email_norm, otp_clean)
+    if not valido:
+        return False, "Codice non valido o scaduto. Richiedi un nuovo codice."
+ 
+    # ── Aggiornamento hash ────────────────────────────────────────────────
+    nuovo_hash = hash_password(nuova_password)
+    aggiornato = db.aggiorna_password_hash(email_norm, nuovo_hash)
+    if not aggiornato:
+        logger.error("aggiorna_password_hash fallito per %s", email_norm)
+        return False, "Errore interno durante l'aggiornamento. Riprova."
+ 
+    # ── Email di conferma (best-effort, non blocca il flusso) ────────────
+    try:
+        send_email(
+            email_norm,
+            "✅ Password aggiornata — Personal Budget",
+            _email_conferma_body(email_norm),
+        )
+    except Exception as exc:
+        logger.warning("Email conferma reset non inviata a %s: %s", email_norm, exc)
+ 
+    logger.info("Password aggiornata con successo per %s.", email_norm)
+    return True, "Password aggiornata con successo! Ora puoi accedere."
+
+# ── Elimina account utente ──────────────────────────────────────────────
+
+def delete_user_account(email: str, password: str) -> tuple[bool, str]:
+    """
+    Elimina l'account utente previa verifica della password.
+ 
+    Flusso:
+      1. Verifica che email e password siano corrette (richiede login valido)
+      2. Chiama db.elimina_account_utente() che rimuove tutti i dati
+      3. Restituisce (True, messaggio) o (False, errore)
+ 
+    La verifica della password è obbligatoria come secondo fattore
+    di sicurezza prima di un'operazione irreversibile.
+    """
+    if not email or not password:
+        return False, "Email e password sono obbligatorie."
+ 
+    email_norm = str(email).strip().lower()
+ 
+    # Recupera l'hash dal DB e verifica la password
+    try:
+        with db.connetti_db() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT password_hash FROM utenti_registrati WHERE email = %s",
+                    (email_norm,),
+                )
+                row = cursor.fetchone()
+    except Exception as exc:
+        logger.error("delete_user_account — errore lettura DB: %s", exc)
+        return False, "Errore interno. Riprova più tardi."
+ 
+    if not row:
+        return False, "Account non trovato."
+ 
+    stored_hash = row[0]
+    if not verify_password(password, stored_hash):
+        return False, "Password non corretta."
+ 
+    # Eliminazione completa
+    try:
+        conteggio = db.elimina_account_utente(email_norm)
+    except Exception as exc:
+        logger.error("delete_user_account — eliminazione fallita per %s: %s", email_norm, exc)
+        return False, f"Errore durante l'eliminazione: {exc}"
+ 
+    totale = sum(conteggio.values())
+    logger.info(
+        "Account %s eliminato con successo. Totale righe rimosse: %d",
+        email_norm, totale,
+    )
+    return True, "Account eliminato con successo."
