@@ -271,8 +271,8 @@ Worker standalone per il backup dati multi-tenant. Genera un dump SQL filtrato p
 
 ---
 
-## 📄 Proprietà intellettuale
+## 📄 Proprietà intellettuale e Licenza
 
-© 2025 — Tutti i diritti riservati.
+© 2026 — Luigi Pedace. Tutti i diritti riservati.
 
-Questo software è proprietà esclusiva dell'autore. È vietata la copia, la distribuzione, la modifica o qualsiasi utilizzo del codice sorgente, in tutto o in parte, senza previa autorizzazione scritta da parte del titolare.
+Questo software è proprietà esclusiva dell'autore. L'uso, la copia e la distribuzione non autorizzata sono severamente proibiti. Per i dettagli completi, consultare il file [LICENSE](./LICENSE) presente in questo repository.
