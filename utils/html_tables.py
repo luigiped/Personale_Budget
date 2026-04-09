@@ -111,7 +111,7 @@ def render_calendario_html(df: pd.DataFrame) -> str:
         f"<th style='padding:8px 13px;font-size:0.60rem;font-weight:700;"
         f"letter-spacing:1px;text-transform:uppercase;color:{Colors.TEXT_MID};"
         f"text-align:left;background:rgba(0,0,0,0.18);"
-        f"border-bottom:1px solid rgba(79,142,240,0.12);white-space:nowrap;'>{c}</th>"
+        f"border-bottom:1px solid rgba(139,92,246,0.18);white-space:nowrap;'>{c}</th>"
         for c in cols
     )
 
@@ -141,7 +141,7 @@ def render_calendario_html(df: pd.DataFrame) -> str:
             f"<td style='padding:10px 13px;'>{chip_freq_html(freq_str)}</td>",
         ]
         rows_html += (
-            f"<tr style='{bg}border-bottom:1px solid rgba(79,142,240,0.05);'>"
+            f"<tr style='{bg}border-bottom:1px solid rgba(139,92,246,0.06);'>"
             + "".join(cells) + "</tr>"
         )
 
@@ -149,10 +149,10 @@ def render_calendario_html(df: pd.DataFrame) -> str:
     n = df.shape[0]
 
     return f"""
-<div style="border:1px solid rgba(79,142,240,0.12);border-radius:9px;overflow:hidden;margin-top:4px;">
+<div style="border:1px solid rgba(139,92,246,0.20);border-radius:12px;overflow:hidden;margin-top:4px;">
   <div style="display:flex;align-items:center;justify-content:space-between;
-              padding:9px 14px;background:rgba(79,142,240,0.04);
-              border-bottom:1px solid rgba(79,142,240,0.12);">
+              padding:9px 14px;background:rgba(139,92,246,0.07);
+              border-bottom:1px solid rgba(139,92,246,0.18);">
     <span style="font-size:0.68rem;font-weight:700;letter-spacing:1.2px;
                  text-transform:uppercase;color:{Colors.TEXT_MID};">
       Spese pianificate — {n} voci
@@ -176,11 +176,11 @@ def render_calendario_html(df: pd.DataFrame) -> str:
 # ---------------------------------------------------------------------------
 
 FREQ_STYLE: dict[str, tuple[str, str, str]] = {
-    "Mensile":    ("#82b4f7", "rgba(79,142,240,0.10)",  "rgba(79,142,240,0.28)"),
-    "Annuale":    ("#f5a623", "rgba(245,166,35,0.10)",   "rgba(245,166,35,0.25)"),
-    "Semestrale": ("#9b74f5", "rgba(155,116,245,0.10)",  "rgba(155,116,245,0.25)"),
+    "Mensile":    ("#c4b5fd", "rgba(139,92,246,0.12)", "rgba(139,92,246,0.30)"),
+    "Annuale":    ("#f5a623", "rgba(245,166,35,0.12)", "rgba(245,166,35,0.28)"),
+    "Semestrale": ("#a78bfa", "rgba(167,139,250,0.12)", "rgba(167,139,250,0.28)"),
 }
-_DEFAULT_FREQ_STYLE = ("#82b4f7", "rgba(79,142,240,0.10)", "rgba(79,142,240,0.28)")
+_DEFAULT_FREQ_STYLE = ("#c4b5fd", "rgba(139,92,246,0.12)", "rgba(139,92,246,0.30)")
 
 
 def render_ricorrenti_rows(df: pd.DataFrame, freq_map: dict[int, str]) -> list[str]:

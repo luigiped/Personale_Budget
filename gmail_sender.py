@@ -14,10 +14,18 @@ from urllib.request import Request, urlopen
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2.credentials import Credentials
 
+from config_runtime import IS_CLOUD_RUN
+
 logger = logging.getLogger(__name__)
 
 GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 GMAIL_SEND_ENDPOINT = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+
+
+def _allow_local_token_files() -> bool:
+    """Permette fallback locale solo in sviluppo, mai su Cloud Run/produzione."""
+    app_env = str(os.getenv("APP_ENV", "") or "").strip().lower()
+    return not IS_CLOUD_RUN and app_env not in {"prod", "production"}
 
 
 def _load_token_payload():
@@ -40,6 +48,12 @@ def _load_token_payload():
     except Exception:
         pass
 
+    if not _allow_local_token_files():
+        raise RuntimeError(
+            "Token Gmail non trovato nei secrets runtime. "
+            "In produzione configura GMAIL_TOKEN_SISTEMA tramite Secret Manager o st.secrets."
+        )
+
     candidate_paths = [
         Path("token/token_sistema.json"),
         Path("token_sistema.json"),
@@ -58,7 +72,7 @@ def _build_credentials():
     creds = Credentials.from_authorized_user_info(token_payload, scopes=[GMAIL_SEND_SCOPE])
     if creds.expired and creds.refresh_token:
         creds.refresh(GoogleAuthRequest())
-        if file_path is not None:
+        if file_path is not None and _allow_local_token_files():
             try:
                 file_path.write_text(creds.to_json(), encoding="utf-8")
             except OSError as exc:

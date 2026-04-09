@@ -1,38 +1,57 @@
+# streamlit run interfaccia.py
 import time
 import base64
+import importlib
 import json
+import logging
 import os
+import re
+import Database as db
+import ai_engine
+import logiche as log 
 from datetime import date, datetime, timedelta
- 
+from icon.icon import render_glow_icon
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from html import escape
- 
+from html import escape 
 from config_runtime import (
-    IS_CLOUD_RUN, IS_DEMO, default_base_url,
+    IS_CLOUD_RUN, default_base_url,
     export_runtime_env, load_google_oauth_credentials,
     get_secret, auth_access_mode,
 )
  
 export_runtime_env()
-client_id, client_secret = load_google_oauth_credentials()
+GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET = load_google_oauth_credentials()
 APP_BASE_URL = default_base_url()
  
 try:
-    from streamlit_oauth import OAuth2Component
+    from streamlit_oauth import OAuth2Component, StreamlitOauthError
 except Exception:
     OAuth2Component = None
- 
-import Database as db
-import logiche as log
+
+    class StreamlitOauthError(Exception):
+        pass
+
+try:
+    from google.auth.transport.requests import Request as GoogleAuthRequest
+    from google.oauth2.id_token import verify_oauth2_token
+except Exception:
+    GoogleAuthRequest = None
+    verify_oauth2_token = None
  
 # auth_manager: usa solo le funzioni pure (niente st.*)
 from auth_manager import (
     create_session, validate_session, delete_session,
-    login_email_password, register_user, get_display_name,
+    login_email_password, login_google_user, register_user, get_display_name,
+    is_onboarding_completed, get_auth_provider, mark_onboarding_completed,
     AuthError, AccessDeniedError, SESSION_TOKEN_COOKIE,
+    request_password_reset, confirm_password_reset, delete_user_account,
+    login_totp_step, setup_totp_begin, setup_totp_confirm,
+    cancel_totp_login_challenge,
+    disable_totp_for_user, disable_totp_for_google_user,
+    is_totp_enabled, TwoFactorRequired,
 )
  
 from utils.styles import CSS_ALL
@@ -41,17 +60,28 @@ from utils.constants import (
     STRUTTURA_CATEGORIE, PLOTLY_CONFIG,
 )
 from utils.formatters import format_eur, eur0, eur2, hex_to_rgba, badge_html, chip_html
-from utils.charts import style_fig, kpi_card_html, KPI_DEFINITIONS
+from utils.user_settings import (
+    get_struttura_categorie as _get_struttura_cat,
+    aggiungi_dettaglio as _aggiungi_dettaglio,
+    rimuovi_dettaglio as _rimuovi_dettaglio,
+    get_percentuali_budget as _get_percentuali_budget,
+    salva_percentuali_budget as _salva_percentuali_budget,
+    ripristina_percentuali_default as _ripristina_percentuali_default,
+    CATEGORIE_MODIFICABILI,
+)
+from utils.charts import style_fig
 from utils.html_tables import (
     scroll_table, render_calendario_html, render_ricorrenti_rows,
-    _td, _tr, _th
+    _td, _tr
 )
+
+logger = logging.getLogger(__name__)
  
 # ---------------------------------------------------------------------------
 # Demo config
 # ---------------------------------------------------------------------------
-DEMO_USER_EMAIL = get_secret("DEMO_USER_EMAIL") if IS_DEMO else None
-DEMO_USER_PASSWORD = get_secret("DEMO_USER_PASSWORD") if IS_DEMO else None
+DEMO_USER_EMAIL = get_secret("DEMO_USER_EMAIL")
+DEMO_USER_PASSWORD = get_secret("DEMO_USER_PASSWORD")
 DEMO_USER_EMAIL_NORM = str(DEMO_USER_EMAIL or "").strip().lower() if DEMO_USER_EMAIL else None
  
 AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -60,7 +90,12 @@ TOKEN_URL = "https://oauth2.googleapis.com/token"
 # ---------------------------------------------------------------------------
 # Configurazione pagina (deve essere prima di qualsiasi st.*)
 # ---------------------------------------------------------------------------
-st.set_page_config(page_title="Personal Budget Dashboard", layout="wide", page_icon="💰")
+st.set_page_config(
+    page_title="Personal Budget Dashboard", 
+    layout="wide", 
+    page_icon="icon/icona_barra.png",
+    initial_sidebar_state="collapsed" 
+)
 
 
 # Nasconde la navigazione automatica della cartella pages/ dalla sidebar Streamlit.
@@ -75,6 +110,14 @@ st.markdown(f"<style>{CSS_ALL}</style>", unsafe_allow_html=True)
 # Helpers cookie/session (layer Streamlit — responsabilità di questo file)
 # ---------------------------------------------------------------------------
  
+def _get_cookie_manager():
+    try:
+        module = importlib.import_module("extra_streamlit_components")
+        return module.CookieManager(key="pb_cookie_manager")
+    except Exception:
+        return None
+
+
 def _read_cookie(name: str) -> str | None:
     """Legge un cookie dalla request Streamlit (1.30+) o tramite extra_streamlit_components."""
     try:
@@ -88,15 +131,15 @@ def _read_cookie(name: str) -> str | None:
     except Exception:
         pass
  
-    try:
-        import extra_streamlit_components as stx
-        mgr = stx.CookieManager(key="pb_cookie_manager")
-        mgr.get_all(key=f"cookie_get_all_{name}")
-        val = mgr.get(name)
-        if val:
-            return str(val).strip() or None
-    except Exception:
-        pass
+    mgr = _get_cookie_manager()
+    if mgr is not None:
+        try:
+            mgr.get_all(key=f"cookie_get_all_{name}")
+            val = mgr.get(name)
+            if val:
+                return str(val).strip() or None
+        except Exception:
+            pass
     return None
  
  
@@ -109,16 +152,16 @@ def _set_cookie(name: str, value: str, expires_at: datetime | None = None) -> No
     except Exception:
         pass
  
-    try:
-        import extra_streamlit_components as stx
-        mgr = stx.CookieManager(key="pb_cookie_manager")
-        kwargs: dict = {"key": f"cookie_set_{name}", "same_site": "lax", "path": "/"}
-        if expires_at:
-            kwargs["expires_at"] = expires_at
-        mgr.set(name, value, secure=is_https, **kwargs)
-        return
-    except Exception:
-        pass
+    mgr = _get_cookie_manager()
+    if mgr is not None:
+        try:
+            kwargs: dict = {"key": f"cookie_set_{name}", "same_site": "lax", "path": "/"}
+            if expires_at:
+                kwargs["expires_at"] = expires_at
+            mgr.set(name, value, secure=is_https, **kwargs)
+            return
+        except Exception:
+            pass
  
     # Fallback JS
     max_age = ""
@@ -137,17 +180,90 @@ def _set_cookie(name: str, value: str, expires_at: datetime | None = None) -> No
             f"<script>document.cookie='{name}={value};{max_age}SameSite=Lax;path=/;{secure}';</script>",
             height=0,
         )
- 
- 
+
+
 def _delete_cookie(name: str) -> None:
+    mgr = _get_cookie_manager()
+    if mgr is None:
+        return
     try:
-        import extra_streamlit_components as stx
-        mgr = stx.CookieManager(key="pb_cookie_manager")
         mgr.delete(name, key=f"cookie_del_{name}")
     except Exception:
         pass
- 
- 
+
+
+_GOOGLE_OAUTH_KEYS = (
+    "google_login_hidden",
+    "google_delete_confirm",
+    "google_totp_disable_confirm",
+)
+
+
+def _clear_query_params() -> None:
+    try:
+        st.query_params.clear()
+    except Exception:
+        pass
+
+
+def _reset_google_oauth_state(*keys: str) -> None:
+    for key in keys:
+        if not key:
+            continue
+        st.session_state.pop(f"state-{key}", None)
+        st.session_state.pop(f"pkce-{key}", None)
+    st.session_state.pop("oauth_auto_click", None)
+
+
+def _safe_google_authorize_button(
+    oauth2_component,
+    *,
+    name: str,
+    scope: str,
+    redirect_uri: str,
+    key: str,
+    auto_click: bool = False,
+    use_container_width: bool = True,
+    extras_params: dict | None = None,
+):
+    extras_params = extras_params or {}
+    try:
+        return oauth2_component.authorize_button(
+            name=name,
+            scope=scope,
+            redirect_uri=redirect_uri,
+            key=key,
+            auto_click=auto_click,
+            use_container_width=use_container_width,
+            extras_params=extras_params,
+        )
+    except StreamlitOauthError as exc:
+        _reset_google_oauth_state(key)
+        _clear_query_params()
+        logger.warning("OAuth Google reset (%s): %s", key, exc)
+        st.warning("La sessione Google e' scaduta o non e' piu' valida. Riprova.")
+        return None
+
+
+def _clear_pending_totp_state(discard_server_challenge: bool = False) -> None:
+    """Pulisce lo stato locale del secondo step TOTP e, opzionalmente, la challenge server-side."""
+    challenge_token = str(st.session_state.get("pending_2fa_challenge", "") or "").strip()
+    if discard_server_challenge and challenge_token:
+        cancel_totp_login_challenge(challenge_token)
+    for key in ("pending_2fa_email", "pending_2fa_provider", "pending_2fa_challenge", "totp_login_code"):
+        st.session_state.pop(key, None)
+
+
+def _current_user_agent() -> str | None:
+    """Restituisce lo user-agent della richiesta corrente se disponibile."""
+    try:
+        headers = getattr(st.context, "headers", None) or {}
+        value = headers.get("user-agent") or headers.get("User-Agent")
+        return str(value).strip() or None
+    except Exception:
+        return None
+
+
 def _get_session_user() -> str | None:
     """
     Controlla la sessione attiva. Usa la cache in session_state per evitare
@@ -170,31 +286,42 @@ def _get_session_user() -> str | None:
         return cache_user
  
     # Verifica DB
-    email = validate_session(token)
+    email = validate_session(token, user_agent=_current_user_agent())
     if email:
         st.session_state["session_token"] = token
         st.session_state["auth_user_email"] = email
+        st.session_state.setdefault("session_auth_provider", get_auth_provider(email))
         st.session_state["_auth_cache_token"] = token
         st.session_state["_auth_cache_user"] = email
         st.session_state["_auth_cache_checked_at"] = datetime.now().timestamp()
     else:
         for k in ["session_token", "auth_user_email", "_auth_cache_token",
-                  "_auth_cache_user", "_auth_cache_checked_at"]:
+                  "_auth_cache_user", "_auth_cache_checked_at",
+                  "session_auth_provider", "_force_onboarding_email"]:
             st.session_state.pop(k, None)
+        _clear_pending_totp_state(discard_server_challenge=True)
+        _reset_google_oauth_state(*_GOOGLE_OAUTH_KEYS)
+        _clear_query_params()
         _delete_cookie(SESSION_TOKEN_COOKIE)
     return email
  
  
+def _finalize_login(email: str, token: str, expiry: datetime, provider: str = "password") -> None:
+    """Salva il login già autenticato in session_state + cookie."""
+    st.session_state["session_token"] = token
+    st.session_state["auth_user_email"] = email
+    st.session_state["session_auth_provider"] = str(provider or "password").strip().lower()
+    _set_cookie(SESSION_TOKEN_COOKIE, token, expires_at=expiry)
+
+
 def _do_login(email: str) -> bool:
     """Crea sessione e salva token in session_state + cookie."""
     try:
-        token, expiry = create_session(email)
+        token, expiry = create_session(email, user_agent=_current_user_agent())
     except AuthError as exc:
         st.error(str(exc))
         return False
-    st.session_state["session_token"] = token
-    st.session_state["auth_user_email"] = email
-    _set_cookie(SESSION_TOKEN_COOKIE, token, expires_at=expiry)
+    _finalize_login(email, token, expiry)
     return True
  
  
@@ -203,8 +330,15 @@ def _do_logout() -> None:
     if token:
         delete_session(token)
     for k in ["session_token", "auth_user_email", "_auth_cache_token",
-              "_auth_cache_user", "_auth_cache_checked_at", "is_demo_guest"]:
+              "_auth_cache_user", "_auth_cache_checked_at", "is_demo_guest",
+              "session_auth_provider",
+              "_force_onboarding_email",
+              "totp_setup_active", "totp_setup_secret", "totp_setup_uri",
+              "totp_confirm_input", "totp_disable_pwd"]:
         st.session_state.pop(k, None)
+    _clear_pending_totp_state(discard_server_challenge=True)
+    _reset_google_oauth_state(*_GOOGLE_OAUTH_KEYS)
+    _clear_query_params()
     _delete_cookie(SESSION_TOKEN_COOKIE)
  
  
@@ -228,30 +362,94 @@ def _redirect_uri() -> str | None:
     return (APP_BASE_URL.rstrip("/") if APP_BASE_URL else "http://localhost:8080")
  
  
-def _decode_id_token_email(id_token) -> str | None:
+def _decode_id_token_claims(id_token) -> dict | None:
     if not id_token:
+        return None
+    if verify_oauth2_token is None or GoogleAuthRequest is None:
         return None
     try:
         if isinstance(id_token, (bytes, bytearray)):
-            data = json.loads(id_token.decode("utf-8"))
-            email = data.get("email")
-            return str(email).strip().lower() if email else None
-        if isinstance(id_token, str) and "." not in id_token:
-            data = json.loads(id_token)
-            email = data.get("email")
-            return str(email).strip().lower() if email else None
-        if not isinstance(id_token, str):
+            token_raw = id_token.decode("utf-8").strip()
+        elif isinstance(id_token, str):
+            token_raw = id_token.strip()
+        else:
             return None
-        parts = id_token.split(".")
-        if len(parts) < 2:
+        if not token_raw or "." not in token_raw:
             return None
-        payload = parts[1]
-        padding = "=" * (-len(payload) % 4)
-        raw = base64.urlsafe_b64decode((payload + padding).encode()).decode()
-        email = json.loads(raw).get("email")
-        return str(email).strip().lower() if email else None
-    except Exception:
+        claims = verify_oauth2_token(token_raw, GoogleAuthRequest(), GOOGLE_CLIENT_ID or None)
+        issuer = str(claims.get("iss", "")).strip()
+        if issuer not in {"accounts.google.com", "https://accounts.google.com"}:
+            logger.warning("ID token Google con issuer non valido: %s", issuer)
+            return None
+        if claims.get("email_verified") is False:
+            logger.warning("ID token Google con email non verificata.")
+            return None
+        return claims
+    except Exception as exc:
+        logger.warning("Verifica ID token Google fallita: %s", exc)
         return None
+
+
+def _decode_id_token_email(id_token) -> str | None:
+    claims = _decode_id_token_claims(id_token) or {}
+    email = claims.get("email")
+    return str(email).strip().lower() if email else None
+
+
+def _render_totp_login_step() -> None:
+    """Mostra il form di verifica TOTP (secondo step del login)."""
+    pending_email = str(st.session_state.get("pending_2fa_email", "") or "").strip().lower()
+    pending_provider = str(st.session_state.get("pending_2fa_provider", "password") or "password").strip().lower()
+    pending_challenge = str(st.session_state.get("pending_2fa_challenge", "") or "").strip()
+    if pending_provider not in {"password", "google"}:
+        pending_provider = "password"
+
+    if not pending_email or not pending_challenge:
+        _clear_pending_totp_state(discard_server_challenge=True)
+        st.info("Sessione di verifica scaduta. Torna al login.")
+        return
+
+    provider_label = "Google" if pending_provider == "google" else "password"
+    st.markdown(
+        "<div style='text-align:center;margin:12px 0 10px;'>"
+        "<div style='font-size:2.2rem;'>🔐</div>"
+        "<div style='font-size:1.15rem;font-weight:700;color:#f8fbff;margin-top:6px;'>Verifica in due passaggi</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        f"Hai già superato il primo controllo di accesso via {provider_label}. "
+        f"Inserisci il codice a 6 cifre dell'app Authenticator per completare l'accesso a **{pending_email}**."
+    )
+    totp_code = st.text_input(
+        "Codice TOTP",
+        max_chars=6,
+        placeholder="000000",
+        key="totp_login_code",
+        label_visibility="collapsed",
+    )
+    col_verify, col_back = st.columns(2)
+    if col_verify.button("Verifica codice", use_container_width=True, type="primary", key="btn_totp_login"):
+        if not totp_code or len(totp_code) != 6 or not totp_code.isdigit():
+            st.error("Inserisci un codice valido a 6 cifre.")
+        else:
+            try:
+                email_norm, token, expiry = login_totp_step(
+                    pending_email,
+                    totp_code,
+                    pending_challenge,
+                    user_agent=_current_user_agent(),
+                )
+                if not is_onboarding_completed(email_norm):
+                    st.session_state["_force_onboarding_email"] = email_norm
+                _clear_pending_totp_state(discard_server_challenge=False)
+                _finalize_login(email_norm, token, expiry, provider=pending_provider)
+                st.rerun()
+            except AuthError as e:
+                st.error(str(e))
+    if col_back.button("← Torna al login", use_container_width=True, key="btn_totp_back"):
+        _clear_pending_totp_state(discard_server_challenge=True)
+        st.rerun()
  
  
 # ---------------------------------------------------------------------------
@@ -261,70 +459,306 @@ def _decode_id_token_email(id_token) -> str | None:
 def _render_login_screen() -> None:
     mode = auth_access_mode()
  
+    # Sidebar già nascosta via CSS_LOGIN (.login-aurora-bg :has rule)
+ 
+    # ── Sfondo aurora + blob animati (iniettato fuori dalla colonna) ────────
     st.markdown("""
-<style>
-    [data-testid="stSidebarNav"] { padding-top: 1rem !important; }
-    .stSidebar [data-testid="stVerticalBlock"] { gap: 0.5rem !important; }
-
-    /* Omogeneità Selectbox Registro (Grigio come richiesto) */
-    div[data-baseweb="select"] > div {
-        background-color: #1e293b !important; /* Grigio scuro coerente */
-        border: 1px solid #334155 !important;
-    }
-</style>
-""", unsafe_allow_html=True)
+        <div class='login-aurora-bg'>
+            <div class='login-orb login-orb-1'></div>
+            <div class='login-orb login-orb-2'></div>
+            <div class='login-orb login-orb-3'></div>
+        </div>
+    """, unsafe_allow_html=True)
  
     _, center, _ = st.columns([1, 1.4, 1])
     with center:
-        st.markdown("<h1 class='login-title'>💰 Personal Budget</h1>", unsafe_allow_html=True)
-        st.markdown("<p class='login-subtitle'>Accedi per esplorare la dashboard</p>", unsafe_allow_html=True)
+        st.markdown("<div class='login-glass-card'>", unsafe_allow_html=True)
+
+        render_glow_icon("icon/icona_barra.png", width=100)
+        
+        st.markdown("""
+            <div style='text-align: center; margin-bottom: 20px;'>
+                <p class='login-logo-name'>Personal Budget</p>
+                <p class='login-logo-tagline'>Gestione finanza personale</p>
+            </div>
+            <div class='login-status-badge'>
+                <span class='login-status-dot'></span>Servizio attivo
+            </div>
+        """, unsafe_allow_html=True)
  
+        # Titolo / sottotitolo
+        st.markdown("<h2 class='login-heading'>Bentornato</h2>", unsafe_allow_html=True)
+        st.markdown("<p class='login-subheading'>Accedi per esplorare la dashboard</p>", unsafe_allow_html=True)
+ 
+        # ── CLOSED: nessun tab, nessuna azione ───────────────────────────────
         if mode == "closed":
             st.warning("Accesso disabilitato. Riprova quando il servizio sarà riattivato.")
             return
  
-        if IS_DEMO:
-            user_flows_disabled = (mode == "demo_only")
-            tab_login, tab_register, tab_demo = st.tabs(["🔑 Accedi", "📝 Registrati", "🚀 Demo"])
+        user_flows_disabled = (mode == "demo_only")
+        show_demo_tab = (mode == "demo_only")
+
+        # ── COSTRUZIONE TAB: Demo appare solo in modalità demo_only ───────────
+        tab_labels = ["🔑 Accedi", "📝 Registrati"]
+        if show_demo_tab:
+            tab_labels.append("🚀 Demo")
  
-            with tab_login:
-                if user_flows_disabled:
-                    st.info("Login utenti temporaneamente disattivato. Usa la tab Demo.")
+        tabs = st.tabs(tab_labels)
+        tab_login    = tabs[0]
+        tab_register = tabs[1]
+        tab_demo     = tabs[2] if show_demo_tab else None
+ 
+        # ── TAB ACCEDI ────────────────────────────────────────────────────────
+        with tab_login:
+            reset_step = st.session_state.get("_pwd_reset_step")
+ 
+            # STEP 0: secondo step TOTP
+            if st.session_state.get("pending_2fa_email"):
+                _render_totp_login_step()
+
+            # STEP 1: form di login normale
+            elif reset_step is None:
                 email_in = st.text_input("Email", key="login_email", disabled=user_flows_disabled)
                 pwd_in   = st.text_input("Password", type="password", key="login_pwd", disabled=user_flows_disabled)
+ 
                 if st.button("Accedi", use_container_width=True, key="btn_login", disabled=user_flows_disabled):
                     if email_in and pwd_in:
                         try:
-                            email_norm, token, expiry = login_email_password(email_in, pwd_in)
-                            st.session_state["session_token"] = token
-                            st.session_state["auth_user_email"] = email_norm
-                            _set_cookie(SESSION_TOKEN_COOKIE, token, expires_at=expiry)
-                            st.success("Accesso effettuato!")
+                            email_norm, token, expiry = login_email_password(
+                                email_in,
+                                pwd_in,
+                                user_agent=_current_user_agent(),
+                            )
+                            if not is_onboarding_completed(email_norm):
+                                st.session_state["_force_onboarding_email"] = email_norm
+                            _finalize_login(email_norm, token, expiry, provider="password")
                             st.rerun()
-                        except AuthError as exc:
-                            st.error(str(exc))
+                        except TwoFactorRequired as e:
+                            st.session_state["pending_2fa_email"] = e.email
+                            st.session_state["pending_2fa_provider"] = "password"
+                            st.session_state["pending_2fa_challenge"] = e.challenge_token
+                            st.rerun()
+                        except (AuthError, AccessDeniedError) as e:
+                            st.error(str(e))
                     else:
                         st.warning("Inserisci email e password.")
  
-            with tab_register:
-                if user_flows_disabled:
-                    st.info("Registrazione temporaneamente disattivata. Usa la tab Demo.")
-                nome_reg  = st.text_input("Nome",              key="reg_nome",  disabled=user_flows_disabled)
-                email_reg = st.text_input("Email",             key="reg_email", disabled=user_flows_disabled)
-                pwd_reg   = st.text_input("Password",          type="password", key="reg_pwd",  disabled=user_flows_disabled)
-                pwd_reg2  = st.text_input("Conferma password", type="password", key="reg_pwd2", disabled=user_flows_disabled)
-                if st.button("Registrati", use_container_width=True, key="btn_register", disabled=user_flows_disabled):
-                    if not email_reg or not pwd_reg:
-                        st.warning("Compila email e password.")
-                    elif pwd_reg != pwd_reg2:
+                st.markdown("<div style='text-align:right; margin-top:4px;'>", unsafe_allow_html=True)
+                if st.button(
+                    "🔑 Password dimenticata?",
+                    key="btn_forgot_pwd",
+                    disabled=user_flows_disabled,
+                    help="Riceverai un codice via email per reimpostare la password",
+                ):
+                    st.session_state["_pwd_reset_step"] = "request"
+                    st.session_state.pop("_pwd_reset_email", None)
+                    st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+ 
+                # ── GOOGLE OAUTH ────────────────────────────────────────────────
+                st.divider()
+                if OAuth2Component is None:
+                    st.error("Modulo mancante: installa `streamlit-oauth`.")
+                elif not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+                    st.error("Credenziali OAuth mancanti.")
+                else:
+                    login_clicked = st.button(
+                        "Accedi con Google",
+                        key="google_login_custom",
+                        use_container_width=True,
+                        disabled=user_flows_disabled,
+                    )
+                    if user_flows_disabled:
+                        st.caption("Accesso Google disponibile solo in modalità `normal`.")
+                    oauth2 = OAuth2Component(
+                        GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+                        AUTHORIZE_URL, TOKEN_URL, TOKEN_URL, ""
+                    )
+                    if login_clicked and not user_flows_disabled:
+                        st.session_state["oauth_auto_click"] = True
+                        st.rerun()
+
+                    auto_click   = bool(st.session_state.pop("oauth_auto_click", False))
+                    redirect_uri = _redirect_uri()
+                    if not redirect_uri:
+                        st.error("APP_BASE_URL non configurato.")
+                    elif not user_flows_disabled:
+                        result = _safe_google_authorize_button(
+                            oauth2,
+                            name="Accedi con Google",
+                            scope="openid email profile",
+                            redirect_uri=redirect_uri,
+                            key="google_login_hidden",
+                            auto_click=auto_click,
+                            use_container_width=True,
+                            extras_params={"prompt": "select_account"},
+                        )
+                        if result:
+                            id_token = result.get("id_token")
+                            if not id_token and isinstance(result.get("token"), dict):
+                                id_token = result["token"].get("id_token")
+                            claims_google = _decode_id_token_claims(id_token) or {}
+                            email_google = _decode_id_token_email(id_token)
+                            nome_google = str(
+                                claims_google.get("name")
+                                or claims_google.get("given_name")
+                                or ""
+                            ).strip()
+                            if not email_google:
+                                acc = result.get("access_token") or (result.get("token") or {}).get("access_token")
+                                if acc:
+                                    from urllib.request import Request, urlopen
+                                    try:
+                                        req = Request(
+                                            "https://openidconnect.googleapis.com/v1/userinfo",
+                                            headers={"Authorization": f"Bearer {acc}"},
+                                        )
+                                        with urlopen(req, timeout=15) as resp:
+                                            payload = json.loads(resp.read())
+                                            email_google = str(payload.get("email", "")).strip().lower() or None
+                                            nome_google = str(
+                                                payload.get("name")
+                                                or payload.get("given_name")
+                                                or nome_google
+                                            ).strip()
+                                    except Exception:
+                                        pass
+                            if email_google:
+                                try:
+                                    email_norm, token, expiry = login_google_user(
+                                        email_google,
+                                        nome_google,
+                                        user_agent=_current_user_agent(),
+                                    )
+                                    if not is_onboarding_completed(email_norm):
+                                        st.session_state["_force_onboarding_email"] = email_norm
+                                    _finalize_login(email_norm, token, expiry, provider="google")
+                                    _reset_google_oauth_state("google_login_hidden")
+                                    _clear_query_params()
+                                    st.success("Accesso autorizzato.")
+                                    st.rerun()
+                                except TwoFactorRequired as e:
+                                    st.session_state["pending_2fa_email"] = e.email
+                                    st.session_state["pending_2fa_provider"] = "google"
+                                    st.session_state["pending_2fa_challenge"] = e.challenge_token
+                                    _reset_google_oauth_state("google_login_hidden")
+                                    _clear_query_params()
+                                    st.rerun()
+                                except (AuthError, AccessDeniedError) as e:
+                                    st.error(str(e))
+                            if not email_google:
+                                st.error("Impossibile leggere l'email dal profilo Google.")
+ 
+            # STEP 1: inserisci email per reset
+            elif reset_step == "request":
+                st.markdown(
+                    "<p style='color:#5a8dee;font-weight:600;margin-bottom:6px;'>"
+                    "🔐 Reimposta la tua password</p>",
+                    unsafe_allow_html=True,
+                )
+                st.caption(
+                    "Inserisci l'email del tuo account. "
+                    "Se è registrata, riceverai un codice a 6 cifre valido per 15 minuti."
+                )
+                reset_email = st.text_input(
+                    "Email account", key="reset_email_input",
+                    placeholder="es. mario@example.com", disabled=user_flows_disabled,
+                )
+                col_send, col_back = st.columns([3, 1])
+                if col_send.button("📨 Invia codice", use_container_width=True, key="btn_send_otp", disabled=user_flows_disabled):
+                    if not reset_email:
+                        st.warning("Inserisci l'email.")
+                    else:
+                        with st.spinner("Invio codice in corso…"):
+                            ok, msg = request_password_reset(reset_email)
+                        if ok:
+                            st.session_state["_pwd_reset_email"] = reset_email.strip().lower()
+                            st.session_state["_pwd_reset_step"]  = "confirm"
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                if col_back.button("← Indietro", key="btn_reset_back1", use_container_width=True):
+                    st.session_state.pop("_pwd_reset_step", None)
+                    st.session_state.pop("_pwd_reset_email", None)
+                    st.rerun()
+ 
+            # STEP 2: inserisci OTP + nuova password
+            elif reset_step == "confirm":
+                saved_email = st.session_state.get("_pwd_reset_email", "")
+                st.markdown(
+                    "<p style='color:#5a8dee;font-weight:600;margin-bottom:6px;'>"
+                    "🔐 Reimposta la tua password</p>",
+                    unsafe_allow_html=True,
+                )
+                st.caption(
+                    f"Abbiamo inviato un codice a **{saved_email}**. "
+                    "Controlla anche la cartella spam. Il codice scade in **15 minuti**."
+                )
+                otp_in   = st.text_input("Codice ricevuto via email (6 cifre)", key="reset_otp_input", max_chars=6, placeholder="123456", disabled=user_flows_disabled)
+                pwd_new  = st.text_input("Nuova password",         type="password", key="reset_new_pwd",  disabled=user_flows_disabled)
+                pwd_new2 = st.text_input("Conferma nuova password",type="password", key="reset_new_pwd2", disabled=user_flows_disabled)
+                col_confirm, col_back2 = st.columns([3, 1])
+                if col_confirm.button("✅ Conferma nuova password", use_container_width=True, key="btn_confirm_reset", type="primary", disabled=user_flows_disabled):
+                    if not otp_in or not pwd_new or not pwd_new2:
+                        st.warning("Compila tutti i campi.")
+                    elif pwd_new != pwd_new2:
                         st.error("Le password non coincidono.")
                     else:
-                        try:
-                            register_user(email_reg, pwd_reg, nome_reg)
-                            st.success("Registrazione completata! Ora accedi dalla tab 'Accedi'.")
-                        except AuthError as exc:
-                            st.error(str(exc))
+                        with st.spinner("Aggiornamento in corso…"):
+                            ok, msg = confirm_password_reset(saved_email, otp_in, pwd_new)
+                        if ok:
+                            st.session_state["_pwd_reset_step"] = "done"
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                if col_back2.button("← Indietro", key="btn_reset_back2", use_container_width=True):
+                    st.session_state["_pwd_reset_step"] = "request"
+                    st.rerun()
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("📨 Non ho ricevuto il codice — Rinvia", key="btn_resend_otp", disabled=user_flows_disabled):
+                    with st.spinner("Nuovo codice in invio…"):
+                        ok, msg = request_password_reset(saved_email)
+                    if ok:
+                        st.success("Nuovo codice inviato! Controlla la posta.")
+                    else:
+                        st.error(msg)
  
+            # STEP 3: successo
+            elif reset_step == "done":
+                st.success("✅ Password aggiornata con successo!")
+                st.caption("Hai ricevuto una email di conferma. Ora puoi accedere con la tua nuova password.")
+                if st.button("🔑 Torna al login", use_container_width=True, key="btn_back_to_login"):
+                    for k in ("_pwd_reset_step", "_pwd_reset_email"):
+                        st.session_state.pop(k, None)
+                    st.rerun()
+ 
+        # ── TAB REGISTRATI ────────────────────────────────────────────────────
+        with tab_register:
+            if user_flows_disabled:
+                st.info("Registrazione temporaneamente disattivata. Usa la tab Demo.")
+            nome_reg  = st.text_input("Nome",              key="reg_nome",  disabled=user_flows_disabled)
+            email_reg = st.text_input("Email",             key="reg_email", disabled=user_flows_disabled)
+            pwd_reg   = st.text_input("Password",          type="password", key="reg_pwd",  disabled=user_flows_disabled)
+            pwd_reg2  = st.text_input("Conferma password", type="password", key="reg_pwd2", disabled=user_flows_disabled)
+            if st.button("Registrati", use_container_width=True, key="btn_register", disabled=user_flows_disabled):
+                if not email_reg or not pwd_reg:
+                    st.warning("Compila email e password.")
+                elif pwd_reg != pwd_reg2:
+                    st.error("Le password non coincidono.")
+                else:
+                    try:
+                        register_user(email_reg, pwd_reg, nome_reg)
+                        email_norm = str(email_reg).strip().lower()
+                        st.session_state["_force_onboarding_email"] = email_norm
+                        if _do_login(email_norm):
+                            st.success("Registrazione completata. Completa ora la configurazione iniziale.")
+                            st.rerun()
+                        st.success("Registrazione completata! Ora accedi dalla tab 'Accedi'.")
+                    except AuthError as exc:
+                        st.error(str(exc))
+ 
+        # ── TAB DEMO (solo se demo_only) ──────────────────────────────────────
+        if tab_demo is not None:
             with tab_demo:
                 st.markdown(
                     "<p style='color:rgba(230,238,249,0.7);font-size:0.9rem;'>"
@@ -338,64 +772,9 @@ def _render_login_screen() -> None:
                             st.rerun()
                     else:
                         st.error("Credenziali demo non configurate nei secrets.")
-        else:
-            # Produzione: solo Google OAuth
-            if OAuth2Component is None:
-                st.error("Modulo mancante: installa `streamlit-oauth`.")
-                st.stop()
-            if not client_id or not client_secret:
-                st.error("Credenziali OAuth mancanti.")
-                st.stop()
  
-            login_clicked = st.button("Accedi con Google", key="google_login_custom", use_container_width=True)
-            oauth2 = OAuth2Component(client_id, client_secret, AUTHORIZE_URL, TOKEN_URL, TOKEN_URL, "")
-            if login_clicked:
-                st.session_state["oauth_auto_click"] = True
-                st.rerun()
- 
-            auto_click = bool(st.session_state.pop("oauth_auto_click", False))
-            redirect_uri = _redirect_uri()
-            if not redirect_uri:
-                st.error("APP_BASE_URL non configurato.")
-                st.stop()
- 
-            result = oauth2.authorize_button(
-                name="Accedi con Google",
-                scope="openid email profile",
-                redirect_uri=redirect_uri,
-                key="google_login_hidden",
-                auto_click=auto_click,
-                use_container_width=True,
-                extras_params={"prompt": "select_account"},
-            )
-            if result:
-                id_token = result.get("id_token")
-                if not id_token and isinstance(result.get("token"), dict):
-                    id_token = result["token"].get("id_token")
-                email_google = _decode_id_token_email(id_token)
-                if not email_google:
-                    acc = result.get("access_token") or (result.get("token") or {}).get("access_token")
-                    if acc:
-                        from urllib.request import Request, urlopen
-                        try:
-                            req = Request(
-                                "https://openidconnect.googleapis.com/v1/userinfo",
-                                headers={"Authorization": f"Bearer {acc}"},
-                            )
-                            with urlopen(req, timeout=15) as resp:
-                                payload = json.loads(resp.read())
-                                email_google = str(payload.get("email", "")).strip().lower() or None
-                        except Exception:
-                            pass
-                if email_google and _do_login(email_google):
-                    try:
-                        st.query_params.clear()
-                    except Exception:
-                        pass
-                    st.success("Accesso autorizzato.")
-                    st.rerun()
-                if not email_google:
-                    st.error("Impossibile leggere l'email dal profilo Google.")
+        # ── Chiude il div login-glass-card ──────────────────────────────
+        st.markdown("</div>", unsafe_allow_html=True)
  
     st.stop()
  
@@ -415,6 +794,163 @@ try:
     db.pulisci_sessioni_scadute()
 except Exception:
     pass
+
+
+@st.cache_data(show_spinner=False)
+def _load_movimenti_df(user_email_param: str) -> pd.DataFrame:
+    return db.carica_dati(user_email_param)
+
+
+@st.cache_data(show_spinner=False)
+def _load_finanziamenti_df(user_email_param: str) -> pd.DataFrame:
+    return db.carica_finanziamenti(user_email_param)
+
+
+@st.cache_data(show_spinner=False)
+def _load_spese_ricorrenti_df(user_email_param: str) -> pd.DataFrame:
+    return db.carica_spese_ricorrenti(user_email_param)
+
+
+@st.cache_data(show_spinner=False)
+def _load_obiettivi_df(user_email_param: str, solo_attivi: bool = True) -> pd.DataFrame:
+    return db.carica_obiettivi(user_email_param, solo_attivi=solo_attivi)
+
+
+@st.cache_data(show_spinner=False)
+def _get_percentuali_budget_cached(user_email_param: str) -> dict:
+    return _get_percentuali_budget(user_email_param)
+
+
+@st.cache_data(show_spinner=False)
+def _get_struttura_categorie_cached(user_email_param: str) -> dict:
+    return _get_struttura_cat(user_email_param)
+
+
+def _invalidate_runtime_caches(
+    *,
+    movimenti: bool = False,
+    finanziamenti: bool = False,
+    ricorrenti: bool = False,
+    obiettivi: bool = False,
+    settings: bool = False,
+    user_settings: bool = False,
+) -> None:
+    if movimenti:
+        _load_movimenti_df.clear()
+    if finanziamenti:
+        _load_finanziamenti_df.clear()
+    if ricorrenti:
+        _load_spese_ricorrenti_df.clear()
+    if obiettivi:
+        _load_obiettivi_df.clear()
+    if settings:
+        _load_settings_df.clear()
+    if user_settings:
+        _get_percentuali_budget_cached.clear()
+        _get_struttura_categorie_cached.clear()
+    if movimenti or finanziamenti or ricorrenti:
+        _get_anomalie_cached.clear()
+    if movimenti or finanziamenti or ricorrenti or obiettivi:
+        st.session_state.pop("_cal_cache", None)
+
+
+def _compute_goal_metrics(
+    costo: float,
+    accantonato_reale: float,
+    risparmio_mensile_dedicato: float,
+    scadenza,
+    *,
+    today: date | None = None,
+) -> dict:
+    """Calcola stato reale e proiezione futura di un obiettivo finanziario."""
+    today = today or date.today()
+    costo_v = max(0.0, float(costo or 0.0))
+    accantonato_v = max(0.0, float(accantonato_reale or 0.0))
+    dedicato_v = max(0.0, float(risparmio_mensile_dedicato or 0.0))
+
+    scadenza_date = None
+    if scadenza is not None and pd.notna(scadenza):
+        try:
+            scadenza_date = pd.to_datetime(scadenza).date()
+        except Exception:
+            scadenza_date = None
+
+    if scadenza_date is not None:
+        mesi_rimanenti = max(
+            0,
+            (scadenza_date.year - today.year) * 12 + (scadenza_date.month - today.month),
+        )
+        giorni_rimanenti = (scadenza_date - today).days
+        versamenti_previsti = dedicato_v * mesi_rimanenti
+        scadenza_label = scadenza_date.strftime("%b %Y")
+    else:
+        mesi_rimanenti = None
+        giorni_rimanenti = None
+        versamenti_previsti = 0.0
+        scadenza_label = "Nessuna scadenza"
+
+    totale_previsto = accantonato_v + versamenti_previsti
+    gap_attuale = max(0.0, costo_v - accantonato_v)
+    gap_previsto = max(0.0, costo_v - totale_previsto)
+    perc_reale = min(100.0, (accantonato_v / costo_v * 100) if costo_v > 0 else 0.0)
+    perc_previsto = min(100.0, (totale_previsto / costo_v * 100) if costo_v > 0 else 0.0)
+
+    coperto_oggi = costo_v > 0 and accantonato_v >= costo_v
+    coperto_previsto = costo_v > 0 and totale_previsto >= costo_v
+
+    if coperto_oggi:
+        stato = "COPERTO"
+    elif mesi_rimanenti is None:
+        stato = "SENZA_SCADENZA"
+    elif coperto_previsto:
+        stato = "IN_LINEA"
+    else:
+        stato = "INSUFFICIENTE"
+
+    return {
+        "costo": costo_v,
+        "accantonato_reale": accantonato_v,
+        "dedicato_mensile": dedicato_v,
+        "scadenza_date": scadenza_date,
+        "scadenza_label": scadenza_label,
+        "mesi_rimanenti": mesi_rimanenti,
+        "giorni_rimanenti": giorni_rimanenti,
+        "versamenti_previsti": round(versamenti_previsti, 2),
+        "totale_previsto": round(totale_previsto, 2),
+        "gap_attuale": round(gap_attuale, 2),
+        "gap_previsto": round(gap_previsto, 2),
+        "perc_reale": round(perc_reale, 2),
+        "perc_previsto": round(perc_previsto, 2),
+        "coperto_oggi": coperto_oggi,
+        "coperto_previsto": coperto_previsto,
+        "stato": stato,
+    }
+
+
+@st.cache_data(ttl=10800, show_spinner=False)
+def _get_anomalie_cached(user_email_param: str) -> list[dict]:
+    try:
+        return ai_engine.detect_anomalies(
+            df_mov=_load_movimenti_df(user_email_param),
+            df_ric=_load_spese_ricorrenti_df(user_email_param),
+            df_fin=_load_finanziamenti_df(user_email_param),
+        )
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _get_ai_health_cached() -> dict:
+    try:
+        return ai_engine.diagnose_gemini()
+    except Exception as exc:
+        return {
+            "configured": False,
+            "reachable": False,
+            "model": "",
+            "message": f"Diagnostica Gemini non disponibile: {exc}",
+            "sample_response": "",
+        }
  
 # ---------------------------------------------------------------------------
 # Auth check
@@ -428,19 +964,31 @@ user_email = AUTH_USER_EMAIL
  
 # Banner demo
 is_demo_account = False
-if IS_DEMO and DEMO_USER_EMAIL_NORM:
+if DEMO_USER_EMAIL_NORM:
     is_demo_account = str(AUTH_USER_EMAIL).strip().lower() == DEMO_USER_EMAIL_NORM
     st.session_state["is_demo_guest"] = is_demo_account
     if is_demo_account:
         st.info("👁️ **Modalità Demo** — Stai esplorando l'app con dati di esempio.", icon="ℹ️")
  
 NOME_DISPLAY = get_display_name(AUTH_USER_EMAIL, is_demo_account=is_demo_account)
+auth_provider = str(
+    st.session_state.get("session_auth_provider")
+    or get_auth_provider(AUTH_USER_EMAIL)
+    or "password"
+).strip().lower()
+if auth_provider not in {"password", "google"}:
+    auth_provider = "password"
+_forced_onboarding_email = str(st.session_state.get("_force_onboarding_email", "") or "").strip().lower()
+onboarding_required = (not is_demo_account) and (
+    _forced_onboarding_email == str(AUTH_USER_EMAIL).strip().lower()
+    or (not is_onboarding_completed(AUTH_USER_EMAIL))
+)
  
 # ---------------------------------------------------------------------------
 # Caricamento dati
 # ---------------------------------------------------------------------------
- 
-df_mov = db.carica_dati(user_email)
+
+df_mov = _load_movimenti_df(user_email).copy()
 df_mov.columns = [c.capitalize() for c in df_mov.columns]
 if "Data" in df_mov:
     df_mov["Data"] = pd.to_datetime(df_mov["Data"], errors="coerce")
@@ -453,23 +1001,24 @@ if "Tipo" in df_mov:
 if "Categoria" in df_mov:
     df_mov["Categoria"] = df_mov["Categoria"].astype(str).str.upper().str.strip()
  
-if df_mov.empty:
-    st.warning("Nessun movimento trovato. Usa il tab Registro per aggiungere movimenti.")
+if df_mov.empty and not onboarding_required:
+    st.warning("Nessun dato inserito. Usa il tab 'impostazioni rapide' per settare i tuoi dati e 'Registro' per iniziare a tracciare i tuoi movimenti.")
  
-df_fin_db = db.carica_finanziamenti(user_email)
+df_fin_db = _load_finanziamenti_df(user_email).copy()
  
 # ---------------------------------------------------------------------------
 # Helpers settings (asset_settings)
 # ---------------------------------------------------------------------------
- 
-def _load_settings_df() -> pd.DataFrame:
+
+@st.cache_data(show_spinner=False)
+def _load_settings_df(user_email_param: str) -> pd.DataFrame:
     try:
         with db.connetti_db() as conn:
             df = pd.read_sql(
                 "SELECT chiave, valore_numerico, valore_testo "
                 "FROM asset_settings WHERE user_email = %s",
                 conn,
-                params=(user_email,),
+                params=(user_email_param,),
             )
         if df.empty:
             return pd.DataFrame(columns=["valore_numerico", "valore_testo"]).set_index(pd.Index([]))
@@ -498,23 +1047,24 @@ def _save_settings_batch(num_payload: dict = None, txt_payload: dict = None) -> 
                     cur.execute(upsert_q, (str(key), user_email, float(value) if value is not None else None, None))
                 for key, value in txt_payload.items():
                     cur.execute(upsert_q, (str(key), user_email, None, str(value) if value is not None else ""))
+        _invalidate_runtime_caches(settings=True)
         return True, ""
     except Exception as exc:
         return False, str(exc)
  
  
-settings = _load_settings_df()
+settings = _load_settings_df(user_email)
 anno_default = datetime.now().year
 anno_prev_default = anno_default - 1
  
 # Valori di default (solo se mancanti)
 defaults_num = {
     "obiettivo_risparmio_perc": 30.0,
-    "saldo_fineco": 25995.0,
-    "saldo_revolut": 2400.0,
+    "Saldo_conto_principale": 0,
+    "Saldo_conto_secondario": 0,
     "pac_quote": 0.0,
     "pac_capitale_investito": 0.0,
-    "pac_versamento_mensile": 80.0,
+    "pac_versamento_mensile": 100.0,
     "pac_rendimento_stimato": 7.0,
     "fondo_quote": 0.0,
     "fondo_capitale_investito": 0.0,
@@ -522,11 +1072,16 @@ defaults_num = {
     "fondo_valore_quota": 7.28,
     "fondo_rendimento_stimato": 5.0,
     "aliquota_irpef": 0.26,
-    f"saldo_iniziale_{anno_default}": 26482.0,
-    f"risparmio_precedente_{anno_prev_default}": 5657.0,
+    f"saldo_iniziale_{anno_default}": 0,
+    f"risparmio_precedente_{anno_prev_default}": 0,
     "budget_mensile_base": 1600.0,
 }
-defaults_txt = {"pac_ticker": "VNGA80"}
+defaults_txt = {
+    "pac_ticker": "VNGA80",
+    "fondo_codice": "CORAZN90",
+    "fondo_previdoc_slug": "_core-pension-azionario-plus-90-esg",
+    "fondo_teleborsa_slug": "core-pension-azionario-plus-90percent-esg",
+}
 updated = False
 for k, v in defaults_num.items():
     if k not in settings.index or pd.isna(settings.loc[k, "valore_numerico"]):
@@ -537,7 +1092,8 @@ for k, v in defaults_txt.items():
         db.imposta_parametro(k, valore_txt=v, user_email=user_email)
         updated = True
 if updated:
-    settings = _load_settings_df()
+    _invalidate_runtime_caches(settings=True)
+    settings = _load_settings_df(user_email)
  
  
 def s_num(key: str, default: float = 0.0) -> float:
@@ -565,6 +1121,422 @@ def s_num_candidates(keys: list[str], default: float = 0.0) -> float:
         except Exception:
             continue
     return default
+
+
+_quick_setup_completed = bool(s_txt("quick_settings_last_saved_at", "").strip())
+if (not onboarding_required) and (not is_demo_account) and auth_provider == "google" and (not _quick_setup_completed):
+    onboarding_required = True
+
+
+_ONBOARDING_SESSION_KEYS = (
+    "_force_onboarding_email",
+    "_onb_step",
+    "_onb_reset_optional_inputs",
+    "_onb_data_salary",
+    "_onb_data_saldo_iniziale",
+    "_onb_data_risparmio_prev",
+    "_onb_data_pct_necessita",
+    "_onb_data_pct_svago",
+    "_onb_data_pct_investimenti",
+    "_onb_data_pac_ticker",
+    "_onb_data_fondo_codice",
+    "_onb_input_salary",
+    "_onb_input_saldo_iniziale",
+    "_onb_input_risparmio_prev",
+    "_onb_input_pct_necessita",
+    "_onb_input_pct_svago",
+    "_onb_input_pct_investimenti",
+    "_onb_input_pac_ticker",
+    "_onb_input_fondo_codice",
+)
+
+
+def _clear_onboarding_state() -> None:
+    for key in _ONBOARDING_SESSION_KEYS:
+        st.session_state.pop(key, None)
+
+
+def _init_onboarding_state() -> tuple[int, int]:
+    anno_corrente = datetime.now().year
+    anno_precedente = anno_corrente - 1
+    has_manual_save = bool(s_txt("quick_settings_last_saved_at", "").strip())
+    default_budget = float(s_num("budget_mensile_base", 0.0))
+    default_salary = float(s_num("stipendio_mensile", 0.0)) or default_budget
+
+    if not has_manual_save and abs(default_salary - 1600.0) < 1e-9:
+        default_salary = 0.0
+
+    pac_default = s_txt("pac_ticker", "").strip().upper()
+    if not has_manual_save and pac_default == "VNGA80":
+        pac_default = ""
+
+    fondo_default = s_txt("fondo_codice", "").strip().upper()
+    if not has_manual_save and fondo_default == "CORAZN90":
+        fondo_default = ""
+
+    percentuali = _get_percentuali_budget_cached(user_email)
+    st.session_state.setdefault("_onb_step", 1)
+    st.session_state.setdefault("_onb_data_salary", float(default_salary))
+    st.session_state.setdefault(
+        "_onb_data_saldo_iniziale",
+        float(s_num_candidates([f"saldo_iniziale_{anno_corrente}", f"saldo iniziale_{anno_corrente}"], 0.0)),
+    )
+    st.session_state.setdefault(
+        "_onb_data_risparmio_prev",
+        float(s_num_candidates([f"risparmio_precedente_{anno_precedente}", f"risparmio_precedente_{anno_corrente}"], 0.0)),
+    )
+    st.session_state.setdefault("_onb_data_pct_necessita", int(round(percentuali.get("NECESSITÀ", 0.50) * 100)))
+    st.session_state.setdefault("_onb_data_pct_svago", int(round(percentuali.get("SVAGO", 0.30) * 100)))
+    st.session_state.setdefault("_onb_data_pct_investimenti", int(round(percentuali.get("INVESTIMENTI", 0.20) * 100)))
+    st.session_state.setdefault("_onb_data_pac_ticker", pac_default)
+    st.session_state.setdefault("_onb_data_fondo_codice", fondo_default)
+    return anno_corrente, anno_precedente
+
+
+def _render_onboarding_wizard() -> None:
+    anno_corrente, anno_precedente = _init_onboarding_state()
+    total_steps = 4
+    step = int(max(1, min(total_steps, st.session_state.get("_onb_step", 1))))
+    labels = [
+        "Base",
+        "Budget",
+        "Investimenti",
+        "Conferma",
+    ]
+
+    st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+    _, center, _ = st.columns([0.75, 1.8, 0.75])
+    with center:
+        st.markdown(
+            "<div style='padding:28px 30px;border-radius:24px;"
+            "background:rgba(9,15,29,0.86);border:1px solid rgba(92,118,178,0.24);"
+            "box-shadow:0 18px 48px rgba(2,6,23,0.42);'>"
+            "<div style='display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;'>"
+            "<div>"
+            "<div style='font-size:0.78rem;font-weight:700;letter-spacing:1.6px;text-transform:uppercase;color:#60a5fa;'>Primo accesso</div>"
+            "<div style='font-size:1.65rem;font-weight:800;color:#f8fbff;margin-top:4px;'>Configura il tuo profilo finanziario</div>"
+            f"<div style='font-size:0.90rem;color:#93a9c7;margin-top:8px;'>Ciao {escape(NOME_DISPLAY.title())}, bastano pochi passaggi per partire con dati coerenti fin dal primo accesso.</div>"
+            "</div>"
+            f"<div style='font-size:0.82rem;font-weight:700;color:#8fb7ff;background:rgba(79,142,240,0.10);border:1px solid rgba(79,142,240,0.26);padding:8px 14px;border-radius:999px;'>Step {step}/{total_steps}</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        step_cols = st.columns(total_steps)
+        for idx, (col, label) in enumerate(zip(step_cols, labels), start=1):
+            is_active = idx == step
+            is_done = idx < step
+            bg = "rgba(16,217,138,0.14)" if is_done else "rgba(79,142,240,0.12)" if is_active else "rgba(92,118,178,0.10)"
+            border = "rgba(16,217,138,0.35)" if is_done else "rgba(79,142,240,0.30)" if is_active else "rgba(92,118,178,0.18)"
+            color = "#10d98a" if is_done else "#8fb7ff" if is_active else "#5a6f8c"
+            badge = "✓" if is_done else str(idx)
+            col.markdown(
+                f"<div style='border-radius:14px;padding:12px 10px;text-align:center;background:{bg};"
+                f"border:1px solid {border};margin-bottom:18px;'>"
+                f"<div style='font-size:0.74rem;font-weight:800;color:{color};margin-bottom:2px;'>{badge}</div>"
+                f"<div style='font-size:0.78rem;font-weight:700;color:{color};'>{label}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        if step == 1:
+            st.session_state.setdefault("_onb_input_salary", float(st.session_state.get("_onb_data_salary", 0.0)))
+            st.session_state.setdefault("_onb_input_saldo_iniziale", float(st.session_state.get("_onb_data_saldo_iniziale", 0.0)))
+            st.session_state.setdefault("_onb_input_risparmio_prev", float(st.session_state.get("_onb_data_risparmio_prev", 0.0)))
+            st.markdown(
+                "<div style='font-size:1.02rem;font-weight:700;color:#f8fbff;margin-bottom:6px;'>Dati iniziali</div>"
+                f"<div style='font-size:0.88rem;color:#8ba3c7;margin-bottom:16px;'>Inserisci i valori base con cui vuoi partire nel {anno_corrente}. Lo stipendio verrà usato come base iniziale del budget mensile.</div>",
+                unsafe_allow_html=True,
+            )
+            col_salary, col_balance = st.columns(2)
+            col_salary.number_input(
+                "Stipendio mensile netto (€)",
+                min_value=0.0,
+                step=50.0,
+                key="_onb_input_salary",
+            )
+            col_balance.number_input(
+                f"Saldo iniziale {anno_corrente} (€)",
+                min_value=0.0,
+                step=100.0,
+                key="_onb_input_saldo_iniziale",
+            )
+            st.number_input(
+                f"Risparmio trasferito dal {anno_precedente} (€)",
+                min_value=0.0,
+                step=100.0,
+                key="_onb_input_risparmio_prev",
+            )
+            st.caption("Potrai modificare questi valori in qualsiasi momento dalle impostazioni rapide nella sidebar.")
+
+            _, col_next = st.columns([1, 1])
+            if col_next.button("Continua", key="onb_next_1", use_container_width=True, type="primary"):
+                salary = float(st.session_state.get("_onb_input_salary", 0.0) or 0.0)
+                saldo_iniziale = float(st.session_state.get("_onb_input_saldo_iniziale", 0.0) or 0.0)
+                risparmio_prev = float(st.session_state.get("_onb_input_risparmio_prev", 0.0) or 0.0)
+                if salary <= 0:
+                    st.error("Inserisci uno stipendio mensile maggiore di zero per procedere.")
+                else:
+                    st.session_state["_onb_data_salary"] = salary
+                    st.session_state["_onb_data_saldo_iniziale"] = saldo_iniziale
+                    st.session_state["_onb_data_risparmio_prev"] = risparmio_prev
+                    st.session_state["_onb_step"] = 2
+                    st.rerun()
+
+        elif step == 2:
+            st.session_state.setdefault("_onb_input_pct_necessita", int(st.session_state.get("_onb_data_pct_necessita", 50)))
+            st.session_state.setdefault("_onb_input_pct_svago", int(st.session_state.get("_onb_data_pct_svago", 30)))
+            st.session_state.setdefault("_onb_input_pct_investimenti", int(st.session_state.get("_onb_data_pct_investimenti", 20)))
+            st.markdown(
+                "<div style='font-size:1.02rem;font-weight:700;color:#f8fbff;margin-bottom:6px;'>Distribuzione del budget</div>"
+                "<div style='font-size:0.88rem;color:#8ba3c7;margin-bottom:16px;'>Definisci come distribuire il tuo budget mensile tra necessità, svago e investimenti. La somma deve restare al 100%.</div>",
+                unsafe_allow_html=True,
+            )
+            col_n, col_s, col_i = st.columns(3)
+            col_n.slider("Necessità", min_value=0, max_value=100, step=1, key="_onb_input_pct_necessita")
+            col_s.slider("Svago", min_value=0, max_value=100, step=1, key="_onb_input_pct_svago")
+            col_i.slider("Investimenti", min_value=0, max_value=100, step=1, key="_onb_input_pct_investimenti")
+            totale = (
+                int(st.session_state.get("_onb_input_pct_necessita", 0))
+                + int(st.session_state.get("_onb_input_pct_svago", 0))
+                + int(st.session_state.get("_onb_input_pct_investimenti", 0))
+            )
+            is_valid = (totale == 100)
+            banner_bg = "rgba(16,217,138,0.10)" if is_valid else "rgba(250,89,142,0.10)"
+            banner_border = "rgba(16,217,138,0.30)" if is_valid else "rgba(250,89,142,0.30)"
+            banner_text = "#10d98a" if is_valid else "#fa598e"
+            banner_label = "Distribuzione valida" if is_valid else "La somma deve essere 100%"
+            st.markdown(
+                f"<div style='text-align:center;padding:11px;border-radius:12px;margin:12px 0 8px;"
+                f"background:{banner_bg};border:1px solid {banner_border};'>"
+                f"<span style='color:{banner_text};font-weight:700;font-size:0.92rem;'>Totale: {totale}% • {banner_label}</span></div>",
+                unsafe_allow_html=True,
+            )
+
+            col_back, col_next = st.columns(2)
+            if col_back.button("Indietro", key="onb_back_2", use_container_width=True):
+                st.session_state["_onb_data_pct_necessita"] = int(st.session_state.get("_onb_input_pct_necessita", 0))
+                st.session_state["_onb_data_pct_svago"] = int(st.session_state.get("_onb_input_pct_svago", 0))
+                st.session_state["_onb_data_pct_investimenti"] = int(st.session_state.get("_onb_input_pct_investimenti", 0))
+                st.session_state["_onb_step"] = 1
+                st.rerun()
+            if col_next.button("Continua", key="onb_next_2", use_container_width=True, type="primary", disabled=not is_valid):
+                st.session_state["_onb_data_pct_necessita"] = int(st.session_state.get("_onb_input_pct_necessita", 0))
+                st.session_state["_onb_data_pct_svago"] = int(st.session_state.get("_onb_input_pct_svago", 0))
+                st.session_state["_onb_data_pct_investimenti"] = int(st.session_state.get("_onb_input_pct_investimenti", 0))
+                st.session_state["_onb_step"] = 3
+                st.rerun()
+
+        elif step == 3:
+            if st.session_state.pop("_onb_reset_optional_inputs", False):
+                st.session_state.pop("_onb_input_pac_ticker", None)
+                st.session_state.pop("_onb_input_fondo_codice", None)
+            st.session_state.setdefault("_onb_input_pac_ticker", str(st.session_state.get("_onb_data_pac_ticker", "") or ""))
+            st.session_state.setdefault("_onb_input_fondo_codice", str(st.session_state.get("_onb_data_fondo_codice", "") or ""))
+            st.markdown(
+                "<div style='font-size:1.02rem;font-weight:700;color:#f8fbff;margin-bottom:6px;'>Asset opzionali</div>"
+                "<div style='font-size:0.88rem;color:#8ba3c7;margin-bottom:16px;'>Se vuoi, puoi già collegare il tuo PAC e il fondo pensione. Se non hai ancora questi dati, lascia pure i campi vuoti.</div>",
+                unsafe_allow_html=True,
+            )
+            st.text_input(
+                "Ticker ETF PAC (opzionale)",
+                placeholder="es. VWCE, V80A.DE, VNGA80",
+                key="_onb_input_pac_ticker",
+            )
+            st.text_input(
+                "Codice Fondo Pensione (opzionale)",
+                placeholder="es. CORAZN90",
+                key="_onb_input_fondo_codice",
+            )
+            st.caption("Il codice fondo viene salvato subito. Eventuali slug e parametri avanzati resteranno configurabili dopo nelle impostazioni rapide.")
+
+            col_back, col_skip, col_next = st.columns(3)
+            if col_back.button("Indietro", key="onb_back_3", use_container_width=True):
+                st.session_state["_onb_data_pac_ticker"] = str(st.session_state.get("_onb_input_pac_ticker", "") or "").strip().upper()
+                st.session_state["_onb_data_fondo_codice"] = str(st.session_state.get("_onb_input_fondo_codice", "") or "").strip().upper()
+                st.session_state["_onb_step"] = 2
+                st.rerun()
+            if col_skip.button("Salta per ora", key="onb_skip_3", use_container_width=True):
+                st.session_state["_onb_data_pac_ticker"] = ""
+                st.session_state["_onb_data_fondo_codice"] = ""
+                st.session_state["_onb_reset_optional_inputs"] = True
+                st.session_state["_onb_step"] = 4
+                st.rerun()
+            if col_next.button("Continua", key="onb_next_3", use_container_width=True, type="primary"):
+                st.session_state["_onb_data_pac_ticker"] = str(st.session_state.get("_onb_input_pac_ticker", "") or "").strip().upper()
+                st.session_state["_onb_data_fondo_codice"] = str(st.session_state.get("_onb_input_fondo_codice", "") or "").strip().upper()
+                st.session_state["_onb_step"] = 4
+                st.rerun()
+
+        else:
+            stipendio = float(st.session_state.get("_onb_data_salary", 0.0) or 0.0)
+            saldo_iniziale = float(st.session_state.get("_onb_data_saldo_iniziale", 0.0) or 0.0)
+            risparmio_prev = float(st.session_state.get("_onb_data_risparmio_prev", 0.0) or 0.0)
+            perc_necessita = int(st.session_state.get("_onb_data_pct_necessita", 0))
+            perc_svago = int(st.session_state.get("_onb_data_pct_svago", 0))
+            perc_investimenti = int(st.session_state.get("_onb_data_pct_investimenti", 0))
+            totale = perc_necessita + perc_svago + perc_investimenti
+            pac_ticker = str(st.session_state.get("_onb_data_pac_ticker", "") or "").strip().upper()
+            fondo_codice = str(st.session_state.get("_onb_data_fondo_codice", "") or "").strip().upper()
+
+            st.markdown(
+                "<div style='font-size:1.02rem;font-weight:700;color:#f8fbff;margin-bottom:6px;'>Riepilogo finale</div>"
+                "<div style='font-size:0.88rem;color:#8ba3c7;margin-bottom:16px;'>Controlla i dati sotto. Al salvataggio il wizard non verrà più mostrato e potrai rifinire tutto in seguito dalle impostazioni.</div>",
+                unsafe_allow_html=True,
+            )
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Stipendio / Budget base", eur2(stipendio))
+            c2.metric(f"Saldo iniziale {anno_corrente}", eur2(saldo_iniziale))
+            c3.metric(f"Risparmio da {anno_precedente}", eur2(risparmio_prev))
+
+            st.markdown(
+                f"<div style='margin:12px 0 16px;padding:14px 16px;border-radius:14px;"
+                "background:rgba(79,142,240,0.08);border:1px solid rgba(79,142,240,0.18);'>"
+                f"<div style='font-size:0.78rem;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#8fb7ff;margin-bottom:6px;'>Budget</div>"
+                f"<div style='font-size:0.92rem;color:#dde6f5;'>Necessità <strong>{perc_necessita}%</strong> • Svago <strong>{perc_svago}%</strong> • Investimenti <strong>{perc_investimenti}%</strong></div>"
+                f"<div style='font-size:0.82rem;color:#8ba3c7;margin-top:6px;'>PAC: <strong>{escape(pac_ticker or 'Non configurato')}</strong> • Fondo: <strong>{escape(fondo_codice or 'Non configurato')}</strong></div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+
+            col_back, col_finish = st.columns(2)
+            if col_back.button("Indietro", key="onb_back_4", use_container_width=True):
+                st.session_state["_onb_step"] = 3
+                st.rerun()
+
+            if col_finish.button("Completa configurazione", key="onb_finish", use_container_width=True, type="primary"):
+                if stipendio <= 0:
+                    st.error("Lo stipendio mensile deve essere maggiore di zero.")
+                elif totale != 100:
+                    st.error("La distribuzione del budget deve sommare esattamente 100%.")
+                else:
+                    percentuali = {
+                        "NECESSITÀ": perc_necessita / 100.0,
+                        "SVAGO": perc_svago / 100.0,
+                        "INVESTIMENTI": perc_investimenti / 100.0,
+                    }
+                    ts = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+                    num_payload = {
+                        "stipendio_mensile": stipendio,
+                        "budget_mensile_base": stipendio,
+                        f"saldo_iniziale_{anno_corrente}": saldo_iniziale,
+                        f"risparmio_precedente_{anno_precedente}": risparmio_prev,
+                    }
+                    txt_payload = {
+                        "pac_ticker": pac_ticker,
+                        "fondo_codice": fondo_codice,
+                        "fondo_previdoc_slug": "",
+                        "fondo_teleborsa_slug": "",
+                        "impost_percentuali_budget": json.dumps(percentuali, ensure_ascii=False),
+                        "quick_settings_last_saved_at": ts,
+                    }
+                    ok, err = _save_settings_batch(num_payload, txt_payload)
+                    if not ok:
+                        st.error(f"Salvataggio onboarding fallito: {err}")
+                    elif not mark_onboarding_completed(user_email):
+                        st.error("Configurazione salvata, ma non sono riuscito a chiudere l'onboarding. Riprova.")
+                    else:
+                        _invalidate_runtime_caches(settings=True, user_settings=True)
+                        st.session_state["quick_settings_saved_msg"] = f"Configurazione iniziale completata alle {ts}."
+                        _clear_onboarding_state()
+                        st.rerun()
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.stop()
+
+
+if onboarding_required:
+    _render_onboarding_wizard()
+
+
+if user_email and not is_demo_account and not is_totp_enabled(user_email):
+    st.warning(
+        "🔒 **Sicurezza account:** L'autenticazione a due fattori non è attiva. "
+        "Attivala nelle **Impostazioni** per proteggere meglio il tuo account.",
+        icon="⚠️",
+    )
+
+
+def _build_fondo_urls(codice: str, previdoc_slug: str, teleborsa_slug: str) -> tuple[str, str]:
+    cod_up = codice.strip().upper()
+    cod_lo = codice.strip().lower()
+    b64_suffix = base64.b64encode(f"FM.{cod_up}".encode()).decode().rstrip("=")
+    previdoc_url = f"http://www.previdoc.it/d/Ana/{cod_up}/{previdoc_slug}"
+    teleborsa_url = f"https://www.teleborsa.it/fondi/{teleborsa_slug}-{cod_lo}-{b64_suffix}"
+    return previdoc_url, teleborsa_url
+
+
+@st.cache_data(ttl=43200, show_spinner=False)
+def _fetch_quota_fondo_pensione(
+    codice: str,
+    previdoc_slug: str,
+    teleborsa_slug: str,
+    _bust: str = "v2",
+) -> tuple[float | None, str, str]:
+    import requests
+    from bs4 import BeautifulSoup
+
+    previdoc_url, teleborsa_url = _build_fondo_urls(codice, previdoc_slug, teleborsa_slug)
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "it-IT,it;q=0.9",
+    }
+
+    def _parse_previdoc(html: str) -> tuple[float | None, str]:
+        soup = BeautifulSoup(html, "html.parser")
+        testo = soup.get_text(separator="\n")
+        nav_val, data_fondo = None, ""
+        for dt in soup.find_all("dt"):
+            dd = dt.find_next_sibling("dd")
+            if not dd:
+                continue
+            label = dt.get_text(strip=True)
+            value = dd.get_text(strip=True)
+            if "Valore quota" in label:
+                match = re.search(r"([\d]+[,.][\d]{2,4})", value)
+                if match:
+                    nav_val = float(match.group(1).replace(",", "."))
+            elif "Ultimo aggiornamento" in label:
+                data_fondo = value
+        if nav_val is None:
+            match = re.search(r"Valore quota[\s\S]{0,30}?([\d]+[,.][\d]{2,4})", testo)
+            if match:
+                nav_val = float(match.group(1).replace(",", "."))
+        if not data_fondo:
+            match = re.search(r"Ultimo aggiornamento[\s\S]{0,30}?(\d{2}/\d{2}/\d{4})", testo)
+            if match:
+                data_fondo = match.group(1)
+        return nav_val, data_fondo
+
+    def _parse_teleborsa(html: str) -> tuple[float | None, str]:
+        testo = BeautifulSoup(html, "html.parser").get_text(separator="\n")
+        nav_val, data_fondo = None, ""
+        match = re.search(r"\n\s*([\d]{1,2}[,.][\d]{3,4})\s*\n\s*[+\-][\d.,]+%", testo)
+        if match:
+            nav_val = float(match.group(1).replace(",", "."))
+        match_data = re.search(r"Ultimo aggiornamento[:\s*]+(\d{2}/\d{2}/\d{4})", testo)
+        if match_data:
+            data_fondo = match_data.group(1)
+        return nav_val, data_fondo
+
+    for url, parser in ((previdoc_url, _parse_previdoc), (teleborsa_url, _parse_teleborsa)):
+        try:
+            response = requests.get(url, headers=headers, timeout=15)
+            response.raise_for_status()
+            nav_val, data_fondo = parser(response.text)
+            if nav_val and nav_val > 0:
+                ts = datetime.now().strftime("%d/%m/%Y %H:%M")
+                logger.info("Quota fondo [%s]: %.4f € (%s) da %s", codice, nav_val, data_fondo, url)
+                return nav_val, data_fondo, ts
+        except Exception as exc:
+            logger.warning("_fetch_quota_fondo_pensione [%s]: %s", url, exc)
+
+    return None, "", ""
  
  
 # ---------------------------------------------------------------------------
@@ -575,18 +1547,18 @@ def s_num_candidates(keys: list[str], default: float = 0.0) -> float:
 _initials = "".join(w[0].upper() for w in (NOME_DISPLAY or "U").split()[:2]) or "U"
 st.sidebar.markdown(f"""
 <div style="display:flex;align-items:center;gap:12px;padding:12px 12px 10px;
-    background:#0c1120;border:1px solid rgba(112,143,215,0.28);
+    background:transparent !important;border:1px solid rgba(112,143,215,0.28);
     border-radius:14px;margin-bottom:4px;margin-top:-6px;">
   <div style="width:46px;height:46px;border-radius:50%;flex-shrink:0;
     background:linear-gradient(135deg,#9b74f5 0%,#f472b6 100%);
     display:flex;align-items:center;justify-content:center;
     font-size:1.1rem;font-weight:800;color:#fff;
-    box-shadow:0 0 16px rgba(155,116,245,0.35);">{_initials}</div>
+    box-shadow:0 0 16px rgba(155,116,245,0.35);">{escape(_initials)}</div>
   <div style="min-width:0;overflow:hidden;">
     <div style="font-size:0.88rem;font-weight:700;color:#ffffff;
-      white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{NOME_DISPLAY}</div>
+      white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{escape(str(NOME_DISPLAY or 'Utente'))}</div>
     <div style="font-size:0.72rem;color:#60a5fa;margin-top:1px;
-      white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{AUTH_USER_EMAIL}</div>
+      white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{escape(str(AUTH_USER_EMAIL or ''))}</div>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -624,25 +1596,118 @@ if last_saved:
  
 with st.sidebar.expander("Impostazioni rapide", expanded=False):
     with st.form("quick_settings_form", clear_on_submit=False):
-        target_perc         = st.number_input(f"Incremento risparmio % (vs {prev_year})", 0.0, 100.0, s_num("obiettivo_risparmio_perc", 30.0), 1.0)
-        risp_prev           = st.number_input(f"Risparmio anno prec. ({prev_year}) €", 0.0, value=s_num_candidates(risp_prev_candidates, 0.0), step=100.0)
-        saldo_iniziale_set  = st.number_input(f"Saldo iniziale {anno_sel} (€)", 0.0, value=s_num_candidates(saldo_iniziale_candidates, 0.0), step=100.0)
-        budget_base_set     = st.number_input("Budget mensile base (€)", 0.0, value=s_num("budget_mensile_base", 0.0), step=50.0)
-        saldo_fineco_set    = st.number_input("Saldo Fineco (€)", 0.0, value=s_num("saldo_fineco", 25995.0), step=50.0)
-        saldo_revolut_set   = st.number_input("Saldo Revolut (€)", 0.0, value=s_num("saldo_revolut", 2400.0), step=50.0)
-        pac_quote_set       = st.number_input("Quote PAC", 0, value=int(s_num("pac_quote", 0)), step=1)
-        pac_capitale_base_set = st.number_input("Capitale PAC investito (€)", 0.0, value=s_num("pac_capitale_investito", 0.0), step=10.0)
-        pac_vers_set        = st.number_input("Versamento mensile PAC (€)", 0.0, value=s_num("pac_versamento_mensile", 80.0), step=10.0)
-        pac_ticker_set      = st.text_input("Ticker ETF PAC", value=s_txt("pac_ticker", "VNGA80"))
-        pac_rend_set        = st.number_input("Rendimento PAC stimato (%)", 0.0, value=s_num("pac_rendimento_stimato", 7.0), step=0.5)
-        fondo_quote_set     = st.number_input("Quote Fondo Pensione", 0.0, value=s_num("fondo_quote", 0.0), step=1.0)
-        fondo_capitale_base_set = st.number_input("Capitale Fondo investito (€)", 0.0, value=s_num("fondo_capitale_investito", 0.0), step=10.0)
-        fondo_vers_set      = st.number_input("Versamento mensile Fondo (€)", 0.0, value=s_num("fondo_versamento_mensile", 50.0), step=10.0)
-        fondo_quota_set     = st.number_input("Valore quota Fondo", 0.0, value=s_num("fondo_valore_quota", 7.28), step=0.01, format="%.4f")
-        aliq_irpef_set      = st.number_input("Aliquota IRPEF (0-1)", 0.0, 1.0, s_num("aliquota_irpef", 0.26), 0.01, format="%.2f")
-        fondo_rend_set      = st.number_input("Rendimento Fondo stimato (%)", 0.0, value=s_num("fondo_rendimento_stimato", 5.0), step=0.5)
-        fondo_tfr_set       = st.number_input("TFR versato anno (€)", 0.0, value=s_num("fondo_tfr_versato_anno", 0.0), step=100.0)
-        fondo_snapshot_set  = st.text_input("Data snapshot Fondo (YYYY-MM-DD)", value=s_txt("fondo_data_snapshot", str(date.today())))
+        target_perc = st.number_input(
+            f"Incremento risparmio % (vs {prev_year})",
+            0.0,
+            100.0,
+            s_num("obiettivo_risparmio_perc", 30.0),
+            1.0,
+        )
+        risp_prev = st.number_input(
+            f"Risparmio anno prec. ({prev_year}) €",
+            0.0,
+            value=s_num_candidates(risp_prev_candidates, 0.0),
+            step=100.0,
+        )
+        saldo_iniziale_set = st.number_input(
+            f"Saldo iniziale {anno_sel} (€)",
+            0.0,
+            value=s_num_candidates(saldo_iniziale_candidates, 0.0),
+            step=100.0,
+        )
+        budget_base_set = st.number_input(
+            "Budget mensile base (€)",
+            0.0,
+            value=s_num("budget_mensile_base", 0.0),
+            step=50.0,
+        )
+        Saldo_conto_principale_set = st.number_input(
+            "Saldo Conto Prin. (€)",
+            0.0,
+            value=s_num("Saldo_conto_principale", 0),
+            step=50.0,
+        )
+        Saldo_conto_secondario_set = st.number_input(
+            "Saldo Conto Sec. (€)",
+            0.0,
+            value=s_num("Saldo_conto_secondario", 0),
+            step=50.0,
+        )
+        pac_quote_set = st.number_input("Quote PAC", 0, value=int(s_num("pac_quote", 0)), step=1)
+        pac_capitale_base_set = st.number_input(
+            "Capitale PAC investito (€)",
+            0.0,
+            value=s_num("pac_capitale_investito", 0.0),
+            step=10.0,
+        )
+        pac_vers_set = st.number_input(
+            "Versamento mensile PAC (€)",
+            0.0,
+            value=s_num("pac_versamento_mensile", 80.0),
+            step=10.0,
+        )
+        pac_ticker_set = st.text_input("Ticker ETF PAC", value=s_txt("pac_ticker", "VNGA80"))
+        pac_rend_set = st.number_input(
+            "Rendimento PAC stimato (%)",
+            0.0,
+            value=s_num("pac_rendimento_stimato", 7.0),
+            step=0.5,
+        )
+        fondo_quote_set = st.number_input(
+            "Quote Fondo Pensione",
+            0.0,
+            value=s_num("fondo_quote", 0.0),
+            step=1.0,
+        )
+        fondo_capitale_base_set = st.number_input(
+            "Capitale Fondo investito (€)",
+            0.0,
+            value=s_num("fondo_capitale_investito", 0.0),
+            step=10.0,
+        )
+        fondo_vers_set = st.number_input(
+            "Versamento mensile Fondo (€)",
+            0.0,
+            value=s_num("fondo_versamento_mensile", 50.0),
+            step=10.0,
+        )
+        fondo_codice_set = st.text_input(
+            "Codice Fondo Pensione",
+            value=s_txt("fondo_codice", "CORAZN90"),
+            help="Codice breve del fondo usato per recuperare la quota live.",
+        )
+        fondo_previdoc_slug_set = st.text_input(
+            "Slug PreviDoc Fondo",
+            value=s_txt("fondo_previdoc_slug", "_core-pension-azionario-plus-90-esg"),
+        )
+        fondo_teleborsa_slug_set = st.text_input(
+            "Slug Teleborsa Fondo",
+            value=s_txt("fondo_teleborsa_slug", "core-pension-azionario-plus-90percent-esg"),
+        )
+        aliq_irpef_set = st.number_input(
+            "Aliquota IRPEF (0-1)",
+            0.0,
+            1.0,
+            s_num("aliquota_irpef", 0.26),
+            0.01,
+            format="%.2f",
+        )
+        fondo_rend_set = st.number_input(
+            "Rendimento Fondo stimato (%)",
+            0.0,
+            value=s_num("fondo_rendimento_stimato", 5.0),
+            step=0.5,
+        )
+        fondo_tfr_set = st.number_input(
+            "TFR versato anno (€)",
+            0.0,
+            value=s_num("fondo_tfr_versato_anno", 0.0),
+            step=100.0,
+        )
+        fondo_snapshot_set = st.text_input(
+            "Data snapshot Fondo (YYYY-MM-DD)",
+            value=s_txt("fondo_data_snapshot", str(date.today())),
+        )
  
         if st.form_submit_button("💾 Salva impostazioni", use_container_width=True):
             num_payload = {
@@ -650,15 +1715,14 @@ with st.sidebar.expander("Impostazioni rapide", expanded=False):
                 f"risparmio_precedente_{prev_year}": float(risp_prev),
                 f"saldo_iniziale_{anno_sel}": float(saldo_iniziale_set),
                 "budget_mensile_base": float(budget_base_set),
-                "saldo_fineco": float(saldo_fineco_set),
-                "saldo_revolut": float(saldo_revolut_set),
+                "Saldo_conto_principale": float(Saldo_conto_principale_set),
+                "Saldo_conto_secondario": float(Saldo_conto_secondario_set),
                 "pac_quote": float(pac_quote_set),
                 "pac_capitale_investito": float(pac_capitale_base_set),
                 "pac_versamento_mensile": float(pac_vers_set),
                 "fondo_quote": float(fondo_quote_set),
                 "fondo_capitale_investito": float(fondo_capitale_base_set),
                 "fondo_versamento_mensile": float(fondo_vers_set),
-                "fondo_valore_quota": float(fondo_quota_set),
                 "aliquota_irpef": float(aliq_irpef_set),
                 "pac_rendimento_stimato": float(pac_rend_set),
                 "fondo_rendimento_stimato": float(fondo_rend_set),
@@ -667,6 +1731,9 @@ with st.sidebar.expander("Impostazioni rapide", expanded=False):
             txt_payload = {
                 "pac_ticker": str(pac_ticker_set).strip(),
                 "fondo_data_snapshot": str(fondo_snapshot_set),
+                "fondo_codice": str(fondo_codice_set).strip().upper(),
+                "fondo_previdoc_slug": str(fondo_previdoc_slug_set).strip(),
+                "fondo_teleborsa_slug": str(fondo_teleborsa_slug_set).strip(),
             }
             ok, err = _save_settings_batch(num_payload, txt_payload)
             if not ok:
@@ -675,28 +1742,54 @@ with st.sidebar.expander("Impostazioni rapide", expanded=False):
             ts = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
             _save_settings_batch({}, {"quick_settings_last_saved_at": ts})
             st.session_state["quick_settings_saved_msg"] = f"Impostazioni salvate alle {ts}."
-            settings = _load_settings_df()
+            settings = _load_settings_df(user_email)
             st.rerun()
  
 # Parametri correnti (prima e dopo il form, usa sempre i valori del DB ricaricato)
-target_perc_corrente       = float(target_perc)
-risp_prev_corrente         = float(risp_prev)
-budget_base_corrente       = float(budget_base_set)
-pac_quote_corrente         = int(pac_quote_set)
+target_perc_corrente = float(target_perc)
+risp_prev_corrente = float(risp_prev)
+budget_base_corrente = float(budget_base_set)
+pac_quote_corrente = int(pac_quote_set)
 pac_capitale_base_corrente = float(pac_capitale_base_set)
-pac_vers_corrente          = float(pac_vers_set)
-pac_rend_corrente          = float(pac_rend_set)
-pac_ticker_corrente        = str(pac_ticker_set).strip()
-fondo_quote_corrente       = float(fondo_quote_set)
+pac_vers_corrente = float(pac_vers_set)
+pac_rend_corrente = float(pac_rend_set)
+pac_ticker_corrente = str(pac_ticker_set).strip()
+fondo_quote_corrente = float(fondo_quote_set)
 fondo_capitale_base_corrente = float(fondo_capitale_base_set)
-fondo_vers_corrente        = float(fondo_vers_set)
-fondo_valore_quota_corrente = float(fondo_quota_set)
-fondo_rend_corrente        = float(fondo_rend_set)
-aliquota_irpef_corrente    = float(aliq_irpef_set)
-budget_base                = budget_base_corrente
+fondo_vers_corrente = float(fondo_vers_set)
+fondo_codice_corrente = str(fondo_codice_set).strip().upper()
+fondo_previdoc_slug_corrente = str(fondo_previdoc_slug_set).strip() or s_txt(
+    "fondo_previdoc_slug",
+    "_core-pension-azionario-plus-90-esg",
+)
+fondo_teleborsa_slug_corrente = str(fondo_teleborsa_slug_set).strip() or s_txt(
+    "fondo_teleborsa_slug",
+    "core-pension-azionario-plus-90percent-esg",
+)
+_quota_result = _fetch_quota_fondo_pensione(
+    fondo_codice_corrente,
+    fondo_previdoc_slug_corrente,
+    fondo_teleborsa_slug_corrente,
+)
+_quota_live, _quota_data, _quota_ts = _quota_result if _quota_result else (None, "", "")
+fondo_valore_quota_corrente = (
+    _quota_live if (_quota_live is not None and _quota_live > 0) else s_num("fondo_valore_quota", 0.0)
+)
+_quota_saved = s_num("fondo_valore_quota", 0.0)
+if _quota_live and _quota_live > 0 and abs(float(_quota_live) - float(_quota_saved)) > 1e-9:
+    db.imposta_parametro("fondo_valore_quota", valore_num=_quota_live, user_email=user_email)
+    _invalidate_runtime_caches(settings=True)
+fondo_rend_corrente = float(fondo_rend_set)
+aliquota_irpef_corrente = float(aliq_irpef_set)
+budget_base = budget_base_corrente
  
 # Pannello residuo mese in sidebar
-df_budget = log.budget_spese_annuale(df_mov, anno_sel, budget_base)
+df_budget = log.budget_spese_annuale(
+    df_mov,
+    anno_sel,
+    budget_base,
+    percentuali_override=_get_percentuali_budget_cached(user_email),
+)
 st.sidebar.markdown("<div class='side-title'>Residuo mese</div>", unsafe_allow_html=True)
 st.sidebar.markdown(f"<div class='side-chip'>{MONTH_SHORT.get(mese_sel, mese_sel)}</div>", unsafe_allow_html=True)
 if not df_budget.empty:
@@ -713,16 +1806,143 @@ if not df_budget.empty:
         )
 else:
     st.sidebar.caption("Nessun dato budget disponibile.")
+
+# ── Eliminazione account — sidebar ────────────────────────────────────────────
+st.sidebar.markdown("<hr style='border:0;border-top:1px solid rgba(92,118,178,0.18);margin:18px 0 14px;'>", unsafe_allow_html=True)
+ 
+if not is_demo_account:
+    del_step = st.session_state.get("_del_account_step")
+ 
+    # STEP 0: bottone iniziale
+    if del_step is None:
+        if st.sidebar.button(
+            "🗑️ Elimina account",
+            key="btn_sidebar_del_start",
+            use_container_width=True,
+        ):
+            st.session_state["_del_account_step"] = "confirm"
+            st.rerun()
+ 
+    # STEP 1: conferma con password
+    elif del_step == "confirm":
+        if auth_provider == "google":
+            st.sidebar.warning("⚠️ Operazione irreversibile. Conferma l'identità con Google per continuare.")
+            st.sidebar.caption(
+                "Per gli account Google la password non può essere verificata localmente dall'app. "
+                "Serve una nuova conferma OAuth con lo stesso account."
+            )
+            if OAuth2Component is None:
+                st.sidebar.error("Modulo OAuth mancante. Impossibile confermare l'account Google.")
+            elif not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+                st.sidebar.error("Credenziali OAuth Google mancanti.")
+            else:
+                redirect_uri = _redirect_uri()
+                if not redirect_uri:
+                    st.sidebar.error("APP_BASE_URL non configurato.")
+                else:
+                    oauth2_delete = OAuth2Component(
+                        GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+                        AUTHORIZE_URL, TOKEN_URL, TOKEN_URL, ""
+                    )
+                    result = _safe_google_authorize_button(
+                        oauth2_delete,
+                        name="Conferma con Google",
+                        scope="openid email profile",
+                        redirect_uri=redirect_uri,
+                        key="google_delete_confirm",
+                        use_container_width=True,
+                        extras_params={"prompt": "login", "login_hint": user_email},
+                    )
+                    if result:
+                        id_token = result.get("id_token")
+                        if not id_token and isinstance(result.get("token"), dict):
+                            id_token = result["token"].get("id_token")
+                        email_google = _decode_id_token_email(id_token)
+                        if not email_google:
+                            acc = result.get("access_token") or (result.get("token") or {}).get("access_token")
+                            if acc:
+                                from urllib.request import Request, urlopen
+                                try:
+                                    req = Request(
+                                        "https://openidconnect.googleapis.com/v1/userinfo",
+                                        headers={"Authorization": f"Bearer {acc}"},
+                                    )
+                                    with urlopen(req, timeout=15) as resp:
+                                        payload = json.loads(resp.read())
+                                        email_google = str(payload.get("email", "")).strip().lower() or None
+                                except Exception:
+                                    pass
+                        if email_google and email_google == str(user_email).strip().lower():
+                            _reset_google_oauth_state("google_delete_confirm")
+                            _clear_query_params()
+                            st.session_state["_del_account_step"] = "reconfirm"
+                            st.rerun()
+                        elif email_google:
+                            st.sidebar.error("Hai confermato un account Google diverso da quello loggato.")
+
+            if st.sidebar.button("Annulla", key="btn_sidebar_del_cancel_google", use_container_width=True):
+                st.session_state.pop("_del_account_step", None)
+                st.rerun()
+        else:
+            st.sidebar.warning("⚠️ Operazione irreversibile. Inserisci la password per confermare.")
+            pwd_confirm = st.sidebar.text_input(
+                "Password",
+                type="password",
+                key="del_account_pwd_sidebar",
+            )
+            col_ok, col_no = st.sidebar.columns(2)
+            if col_ok.button("Continua →", key="btn_sidebar_del_ok", use_container_width=True, type="primary"):
+                if not pwd_confirm:
+                    st.sidebar.error("Inserisci la password.")
+                else:
+                    from security import verify_password as _vp
+                    try:
+                        with db.connetti_db() as _conn:
+                            with _conn.cursor() as _cur:
+                                _cur.execute(
+                                    "SELECT password_hash FROM utenti_registrati WHERE email = %s",
+                                    (user_email,),
+                                )
+                                _row = _cur.fetchone()
+                    except Exception:
+                        _row = None
+
+                    if not _row or not _vp(pwd_confirm, _row[0]):
+                        st.sidebar.error("Password non corretta.")
+                    else:
+                        st.session_state["_del_account_step"] = "reconfirm"
+                        st.rerun()
+
+            if col_no.button("Annulla", key="btn_sidebar_del_cancel1", use_container_width=True):
+                st.session_state.pop("_del_account_step", None)
+                st.rerun()
+ 
+    # STEP 2: ultima conferma
+    elif del_step == "reconfirm":
+        st.sidebar.error(f"Elimini **{user_email}** e tutti i suoi dati. Impossibile recuperarli.")
+        col_yes, col_no = st.sidebar.columns(2)
+        if col_yes.button("🗑️ Sì, elimina", key="btn_sidebar_del_final", use_container_width=True, type="primary"):
+            try:
+                db.elimina_account_utente(user_email)
+                _delete_cookie(SESSION_TOKEN_COOKIE)
+                for k in list(st.session_state.keys()):
+                    del st.session_state[k]
+                st.rerun()
+            except Exception as exc:
+                st.sidebar.error(f"Errore: {exc}")
+        if col_no.button("No, annulla", key="btn_sidebar_del_cancel2", use_container_width=True):
+            st.session_state.pop("_del_account_step", None)
+            st.rerun()
  
 # ---------------------------------------------------------------------------
 # Header principale
 # ---------------------------------------------------------------------------
  
 st.markdown(
-    f"<div style='font-family:\"Plus Jakarta Sans\",sans-serif;font-size:0.95rem;"
+    f"<div style='font-family:\"Plus Jakarta Sans\",sans-serif;font-size:0.99rem;"
     f"font-weight:700;letter-spacing:2px;text-transform:uppercase;"
     f"color:{Colors.TEXT_MID};margin-bottom:10px;'>"
-    f"{NOME_DISPLAY} — {MONTH_NAMES.get(mese_sel, mese_sel)} {anno_sel}</div>",
+    f" PERSONAL BUDGET - {MONTH_NAMES.get(mese_sel, mese_sel)} {anno_sel}</div>",
     unsafe_allow_html=True,
 )
  
@@ -741,7 +1961,7 @@ _kpi_data = [
 _kpi_cols = st.columns(4)
 for _col, (_lbl, _val, _col_hex, _glow, _grad) in zip(_kpi_cols, _kpi_data):
     _col.markdown(
-        f"""<div style="background:#0c1120;border:1px solid rgba(92,118,178,0.22);
+        f"""<div style="background:rgba(255,255,255,0.04);backdrop-filter:blur(16px) saturate(150%);-webkit-backdrop-filter:blur(16px) saturate(150%);border:1px solid rgba(92,118,178,0.22);
         border-radius:16px;padding:22px 18px 18px;text-align:center;
         box-shadow:0 4px 28px rgba(0,0,0,0.45),0 0 32px {_glow};position:relative;overflow:hidden;">
   <div style="font-size:0.85rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;
@@ -755,52 +1975,6 @@ for _col, (_lbl, _val, _col_hex, _glow, _grad) in zip(_kpi_cols, _kpi_data):
     )
  
 st.divider()
-
-# CSS selectbox: grigio uniforme per tutti i selectbox del Registro — coerenza visiva
-st.markdown("""<style>
-[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stSelectbox"] [data-baseweb="select"] > div,
-[data-testid="stForm"] div[data-testid="stSelectbox"] [data-baseweb="select"] > div {
-    background-color: #1e293b !important;
-    border: 1px solid #334155 !important;
-    color: #dde6f5 !important;
-    border-radius: 8px !important;
-}
-[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stSelectbox"] [data-baseweb="select"] > div:hover,
-[data-testid="stForm"] div[data-testid="stSelectbox"] [data-baseweb="select"] > div:hover {
-    border-color: #4a5568 !important;
-    background-color: #253348 !important;
-}
-[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stSelectbox"] label,
-[data-testid="stForm"] div[data-testid="stSelectbox"] label {
-    color: rgba(180,200,240,0.70) !important;
-    font-size: 0.75rem !important;
-    font-weight: 600 !important;
-}
-[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stSelectbox"] svg,
-[data-testid="stForm"] div[data-testid="stSelectbox"] svg {
-    fill: #94a3b8 !important;
-}
-/* Nasconde il testo "Press Enter to submit form" nei number_input dentro i form */
-[data-testid="InputInstructions"] {
-    display: none !important;
-}
-/* Uniforma il bordo rosso dei number_input quando in focus dentro form */
-[data-testid="stForm"] input:focus,
-[data-testid="stVerticalBlockBorderWrapper"] input:focus {
-    border-color: rgba(79,142,240,0.5) !important;
-    outline: none !important;
-    box-shadow: 0 0 0 1px rgba(79,142,240,0.3) !important;
-}
-/* Rimuove il bordo rosso da number_input dentro form */
-[data-testid="stForm"] [data-baseweb="input"] > div,
-[data-testid="stVerticalBlockBorderWrapper"] [data-baseweb="input"] > div {
-    border-color: #334155 !important;
-}
-[data-testid="stForm"] [data-baseweb="input"] > div:focus-within,
-[data-testid="stVerticalBlockBorderWrapper"] [data-baseweb="input"] > div:focus-within {
-    border-color: rgba(79,142,240,0.5) !important;
-}
-</style>""", unsafe_allow_html=True)
 
 # Dati filtrati per mese/anno
 mask_mese = (df_mov["Data"].dt.month == mese_sel) & (df_mov["Data"].dt.year == anno_sel)
@@ -819,23 +1993,18 @@ def show_chart(fig: go.Figure, height: int = 300, show_legend: bool = True) -> N
         config=PLOTLY_CONFIG,
     )
  
- 
 # ---------------------------------------------------------------------------
 # Helper calendario scadenze (usato in HOME e altrove)
 # ---------------------------------------------------------------------------
- 
 def _get_calendario_cached() -> dict:
-    """Cache locale del calcolo scadenze per evitare ricalcoli per ogni rerun."""
-    if "_cal_cache" not in st.session_state:
-        st.session_state["_cal_cache"] = {}
-    return st.session_state["_cal_cache"]
- 
- 
+    return st.session_state.setdefault("_cal_cache", {})
+
+
 def _calcolo_scadenze_mese(mese_ref: int, anno_ref: int):
     key = f"{anno_ref}-{mese_ref}"
     cache = _get_calendario_cached()
     if key not in cache:
-        df_ric = db.carica_spese_ricorrenti(user_email)
+        df_ric = _load_spese_ricorrenti_df(user_email).copy()
         if not df_ric.empty:
             df_ric = df_ric.rename(columns={
                 "descrizione": "Descrizione", "importo": "Importo",
@@ -850,14 +2019,334 @@ def _calcolo_scadenze_mese(mese_ref: int, anno_ref: int):
         }) if not df_fin_db.empty else pd.DataFrame()
         cache[key] = log.calcolo_spese_ricorrenti(df_ric, df_fin_cal, df_mov, mese_ref, anno_ref)
     return cache[key]
- 
- 
+
+
+def _fmt_k(v) -> str:
+    try:
+        v = float(v)
+        return f"€{v/1000:.1f}k" if abs(v) >= 1000 else f"€{v:.0f}"
+    except Exception:
+        return ""
+
+
+def _fallback_insight_previsione(
+    anno: int,
+    mese_cutoff: int,
+    saldo_osservato: float,
+    saldo_dicembre: float,
+    delta_previsto: float,
+    entrate_attese: float,
+    uscite_attese: float,
+    metodo: str,
+) -> str:
+    mese_label = MONTH_NAMES.get(int(mese_cutoff), str(mese_cutoff))
+    mesi_restanti = max(12 - int(mese_cutoff), 0)
+    verbo = "salire" if saldo_dicembre >= saldo_osservato else "scendere"
+    delta_mensile_label = f"€ {abs(delta_previsto):,.0f}"
+
+    if mesi_restanti == 0:
+        return (
+            f"A dicembre {anno} il saldo si chiude a circa € {saldo_dicembre:,.0f}. "
+            f"Il delta mensile osservato finale è circa {delta_previsto:+,.0f} €."
+        )
+
+    if "senza entrate recenti" in str(metodo).lower():
+        return (
+            f"Da {mese_label.upper()} a dicembre il saldo potrebbe {verbo} fino a circa € {saldo_dicembre:,.0f}. "
+            f"Non risultano entrate recenti confermate: la proiezione assume € 0 di entrate e circa € {uscite_attese:,.0f} di uscite al mese."
+        )
+
+    return (
+        f"Da {mese_label.upper()} a dicembre il saldo potrebbe {verbo} fino a circa € {saldo_dicembre:,.0f}. "
+        f"La proiezione usa entrate attese di circa € {entrate_attese:,.0f} e uscite di circa € {uscite_attese:,.0f} al mese, "
+        f"per un delta mensile stimato di {'+' if delta_previsto >= 0 else '-'}{delta_mensile_label}."
+    )
+
+
+@st.cache_data(ttl=10800, show_spinner=False)
+def _genera_insight_previsione(
+    anno: int,
+    mese_cutoff: int,
+    saldo_osservato: float,
+    saldo_dicembre: float,
+    delta_previsto: float,
+    entrate_attese: float,
+    uscite_attese: float,
+    metodo: str,
+) -> str:
+    return _fallback_insight_previsione(
+        anno=anno,
+        mese_cutoff=mese_cutoff,
+        saldo_osservato=saldo_osservato,
+        saldo_dicembre=saldo_dicembre,
+        delta_previsto=delta_previsto,
+        entrate_attese=entrate_attese,
+        uscite_attese=uscite_attese,
+        metodo=metodo,
+    )
+
+
+def _fallback_spiegazione_previsione_ai(
+    anno: int,
+    mese_cutoff: int,
+    saldo_osservato: float,
+    saldo_dicembre: float,
+    delta_previsto: float,
+    entrate_attese: float,
+    uscite_attese: float,
+    metodo: str,
+) -> str:
+    mese_label = MONTH_NAMES.get(int(mese_cutoff), str(mese_cutoff))
+    saldo_diff = saldo_dicembre - saldo_osservato
+    direzione = "cresce" if saldo_diff > 0 else "scende" if saldo_diff < 0 else "resta quasi stabile"
+    if "senza entrate recenti" in str(metodo).lower():
+        return (
+            f"La previsione da {mese_label} a dicembre non assume nuove entrate: usa € 0 di entrate attese "
+            f"e circa € {uscite_attese:,.0f} di uscite al mese. Per questo il saldo {direzione} invece di seguire un trend statistico."
+        )
+    return (
+        f"La previsione usa un cash flow mensile stimato di {delta_previsto:+,.0f} €, ottenuto da entrate attese "
+        f"di circa € {entrate_attese:,.0f} e uscite attese di circa € {uscite_attese:,.0f}. "
+        f"Per questo il saldo a dicembre converge verso € {saldo_dicembre:,.0f}."
+    )
+
+
+@st.cache_data(ttl=10800, show_spinner=False)
+def _genera_spiegazione_previsione_ai(
+    anno: int,
+    mese_cutoff: int,
+    saldo_osservato: float,
+    saldo_dicembre: float,
+    delta_previsto: float,
+    entrate_attese: float,
+    uscite_attese: float,
+    metodo: str,
+) -> str:
+    fallback = _fallback_spiegazione_previsione_ai(
+        anno=anno,
+        mese_cutoff=mese_cutoff,
+        saldo_osservato=saldo_osservato,
+        saldo_dicembre=saldo_dicembre,
+        delta_previsto=delta_previsto,
+        entrate_attese=entrate_attese,
+        uscite_attese=uscite_attese,
+        metodo=metodo,
+    )
+    prompt = (
+        f"Previsione saldo deterministica dell'utente:\n"
+        f"- Anno: {anno}\n"
+        f"- Ultimo mese reale: {MONTH_NAMES.get(int(mese_cutoff), mese_cutoff)}\n"
+        f"- Saldo osservato attuale: € {saldo_osservato:,.0f}\n"
+        f"- Saldo previsto a dicembre: € {saldo_dicembre:,.0f}\n"
+        f"- Delta mensile previsto: {delta_previsto:+.0f} €/mese\n"
+        f"- Entrate attese: € {entrate_attese:,.0f}/mese\n"
+        f"- Uscite attese: € {uscite_attese:,.0f}/mese\n"
+        f"- Metodo: {metodo}\n\n"
+        "Scrivi 2 frasi in italiano, tono chiaro e pratico. "
+        "Spiega perché il saldo sale o scende e indica quale variabile conta di più. "
+        "Max 45 parole. Nessun markdown."
+    )
+    try:
+        text = ai_engine._call_gemini("Sei un analista finanziario sintetico.", prompt)
+        text = " ".join(str(text or "").split())
+        return text or fallback
+    except Exception:
+        return fallback
+
+
+def _simula_scenario_previsione(
+    df_prev: pd.DataFrame,
+    mese_inizio: int,
+    entrate_attese: float,
+    uscite_attese: float,
+    una_tantum: float = 0.0,
+) -> pd.DataFrame:
+    if df_prev is None or df_prev.empty:
+        return pd.DataFrame()
+
+    df_base = df_prev.copy().sort_values("MeseNum")
+    df_reale = df_base[df_base["Tipo"] == "Reale"].sort_values("MeseNum")
+    if df_reale.empty:
+        return pd.DataFrame()
+
+    ultimo_mese_reale = int(df_reale["MeseNum"].max())
+    saldo_corrente = float(df_reale["Saldo"].iloc[-1])
+    delta_scenario = float(entrate_attese - uscite_attese)
+    if entrate_attese <= 1e-9:
+        delta_scenario = min(delta_scenario, 0.0)
+
+    rows = []
+    for _, row in df_base.iterrows():
+        mese_num = int(row["MeseNum"])
+        if mese_num <= ultimo_mese_reale:
+            saldo_val = float(row["Saldo"])
+            tipo = "Reale"
+        else:
+            if mese_num < mese_inizio:
+                delta = float(row.get("DeltaPrevisto") or 0.0)
+            else:
+                delta = delta_scenario + (una_tantum if mese_num == mese_inizio else 0.0)
+            saldo_corrente += delta
+            saldo_val = saldo_corrente
+            tipo = "Scenario"
+
+        rows.append({
+            "Mese": row["Mese"],
+            "MeseNum": mese_num,
+            "SaldoScenario": round(saldo_val, 2),
+            "TipoScenario": tipo,
+        })
+
+    return pd.DataFrame(rows)
+
+
+if "ai_chat_history" not in st.session_state:
+    st.session_state["ai_chat_history"] = []
+
+
+@st.dialog("🤖 Assistente Finanziario", width="large")
+def _show_ai_chat():
+    st.caption(
+        "Fai domande sui tuoi dati finanziari in linguaggio naturale. "
+        "Attenzione: i dati vengono inviati a un servizio AI esterno per l'elaborazione, ma non vengono memorizzati. (BETA, funzionalità sperimentale) "
+    )
+    st.caption(
+        "_Esempi: 'Quanto ho speso in svago questo mese?' · "
+        "'Posso permettermi un acquisto da €1.200?' · "
+        "'Perché la previsione del saldo scende?'_"
+    )
+    st.divider()
+
+    history = st.session_state["ai_chat_history"]
+    for msg in history:
+        with st.chat_message("user" if msg["role"] == "user" else "assistant"):
+            st.markdown(msg.get("content", ""))
+
+    user_input = st.chat_input("Scrivi un messaggio...")
+    if user_input:
+        with st.chat_message("user"):
+            st.markdown(user_input)
+
+        try:
+            _df_ric_ai = _load_spese_ricorrenti_df(user_email).copy()
+            _oggi_ai = datetime.now()
+            _kpi_ai = log.calcola_kpi_dashboard(df_mov, _oggi_ai.month, _oggi_ai.year)
+            _saldo_principale = s_num("Saldo_conto_principale", 0.0)
+            _saldo_secondario = s_num("Saldo_conto_secondario", 0.0)
+            _kpi_ai["saldo_reale_totale"] = round(_saldo_principale + _saldo_secondario, 2)
+            _kpi_ai["saldo_fineco"] = _saldo_principale
+            _kpi_ai["saldo_revolut"] = _saldo_secondario
+            _saldo_iniziale_ai = s_num_candidates(
+                [f"saldo_iniziale_{_oggi_ai.year}", f"saldo iniziale_{_oggi_ai.year}"],
+                0.0,
+            )
+
+            _risp_prec = []
+            for _i in range(1, 4):
+                _mp = _oggi_ai.month - _i
+                _ap = _oggi_ai.year
+                if _mp <= 0:
+                    _mp += 12
+                    _ap -= 1
+                _risp_prec.append(log.calcola_kpi_dashboard(df_mov, _mp, _ap).get("risparmio_mese", 0.0))
+            _kpi_ai["risparmio_medio_3mesi"] = round(sum(_risp_prec) / len(_risp_prec), 2)
+
+            _df_prev_ai = log.previsione_saldo(
+                df_mov,
+                _oggi_ai.year,
+                saldo_iniziale=_saldo_iniziale_ai,
+                mese_riferimento=_oggi_ai.month,
+            )
+            if not _df_prev_ai.empty:
+                _row_dic = _df_prev_ai[_df_prev_ai["MeseNum"] == 12]
+                if not _row_dic.empty:
+                    _row_dic_0 = _row_dic.iloc[0]
+                    _kpi_ai["saldo_proiettato_dicembre"] = float(_row_dic_0["Saldo"])
+                    _kpi_ai["slope_risparmio_mensile"] = float(_df_prev_ai["SlopeDelta"].iloc[0])
+                    _kpi_ai["r2_previsione"] = float(_df_prev_ai["R2"].iloc[0])
+                    _kpi_ai["delta_previsto_mensile"] = float(_row_dic_0.get("DeltaPrevisto") or 0.0)
+                    _kpi_ai["entrate_attese_previsione"] = float(_row_dic_0.get("EntrateAttese") or 0.0)
+                    _kpi_ai["uscite_attese_previsione"] = float(_row_dic_0.get("UsciteAttese") or 0.0)
+                    _kpi_ai["metodo_previsione_saldo"] = str(_row_dic_0.get("Metodo") or "")
+
+            _ob_lista: list[dict] = []
+            try:
+                _df_ob_ai = _load_obiettivi_df(user_email, solo_attivi=True).copy()
+                if not _df_ob_ai.empty:
+                    _oggi_ob_ai = datetime.now().date()
+                    for _, _ob_r in _df_ob_ai.iterrows():
+                        _ob_metrics_ai = _compute_goal_metrics(
+                            costo=float(_ob_r["costo"]),
+                            accantonato_reale=float(_ob_r.get("accantonato_reale") or 0.0),
+                            risparmio_mensile_dedicato=float(_ob_r["risparmio_mensile_dedicato"]),
+                            scadenza=_ob_r.get("scadenza"),
+                            today=_oggi_ob_ai,
+                        )
+                        _ob_lista.append({
+                            "nome": _ob_r["nome"],
+                            "costo": _ob_metrics_ai["costo"],
+                            "scadenza": (
+                                str(_ob_metrics_ai["scadenza_date"])
+                                if _ob_metrics_ai["scadenza_date"] is not None
+                                else "nessuna"
+                            ),
+                            "accantonato_reale": _ob_metrics_ai["accantonato_reale"],
+                            "dedicato": _ob_metrics_ai["dedicato_mensile"],
+                            "mesi_rim": _ob_metrics_ai["mesi_rimanenti"],
+                            "versamenti_previsti": _ob_metrics_ai["versamenti_previsti"],
+                            "totale_previsto": _ob_metrics_ai["totale_previsto"],
+                            "gap_attuale": _ob_metrics_ai["gap_attuale"],
+                            "gap_previsto": _ob_metrics_ai["gap_previsto"],
+                            "stato": _ob_metrics_ai["stato"],
+                        })
+                    _kpi_ai["obiettivi_utente"] = _ob_lista
+            except Exception as exc:
+                logger.warning("Obiettivi AI: %s", exc)
+
+            _ctx = ai_engine.build_financial_context(
+                kpi=_kpi_ai,
+                df_mov=df_mov,
+                df_ric=_df_ric_ai,
+                df_fin=df_fin_db,
+                obiettivi_utente=_ob_lista,
+            )
+        except Exception as exc:
+            logger.error("Errore build_financial_context: %s", exc)
+            _ctx = "Dati non disponibili."
+
+        with st.chat_message("assistant"):
+            with st.spinner("Sto analizzando i tuoi dati..."):
+                risposta = ai_engine.chat_financial_advisor(
+                    user_message=user_input,
+                    financial_context=_ctx,
+                    chat_history=history,
+                )
+            st.markdown(risposta)
+
+        st.session_state["ai_chat_history"].append({"role": "user", "content": user_input})
+        st.session_state["ai_chat_history"].append({"role": "assistant", "content": risposta})
+
+    if history:
+        st.divider()
+        if st.button("🗑️ Nuova conversazione", use_container_width=False):
+            st.session_state["ai_chat_history"] = []
+            st.rerun()
+
+
+_ai_col1, _ai_col2 = st.columns([8, 1])
+with _ai_col2:
+    if st.button("🤖 AI", use_container_width=True, help="Apri l'assistente finanziario AI"):
+        _show_ai_chat()
+
+st.divider()
+
+
 # ---------------------------------------------------------------------------
 # Tab layout
 # ---------------------------------------------------------------------------
- 
-tab_home, tab_charts, tab_assets, tab_debts, tab_admin = st.tabs([
-    "🏠 HOME", "📈 ANALISI", "💰 PATRIMONIO", "🔗 DEBITI", "📝 REGISTRO"
+
+tab_home, tab_charts, tab_assets, tab_debts, tab_admin, tab_settings = st.tabs([
+    "🏠 HOME", "📈 ANALISI", "💰 PATRIMONIO", "🔗 DEBITI", "📝 TRANSAZIONI", "⚙️ IMPOSTAZIONI"
 ])
  
 # ============================================================
@@ -865,30 +2354,197 @@ tab_home, tab_charts, tab_assets, tab_debts, tab_admin = st.tabs([
 # ============================================================
 with tab_home:
     st.markdown("<div class='section-title'>HOME</div>", unsafe_allow_html=True)
+    _anomalie = _get_anomalie_cached(user_email)
+    _ai_health = _get_ai_health_cached()
+    _gravita_cfg = {
+        "info": {"bg": "rgba(59,130,246,0.12)", "border": "rgba(59,130,246,0.40)", "icon": "ℹ️"},
+        "warning": {"bg": "rgba(251,146,60,0.12)", "border": "rgba(251,146,60,0.45)", "icon": "⚠️"},
+        "alert": {"bg": "rgba(239,68,68,0.14)", "border": "rgba(239,68,68,0.50)", "icon": "🚨"},
+    }
+    _default_cfg = {"bg": "rgba(59,130,246,0.12)", "border": "rgba(59,130,246,0.40)", "icon": "ℹ️"}
+    with st.expander("🤖 Avvisi del tuo assistente AI", expanded=bool(_anomalie)):
+        if _anomalie:
+            for _a in _anomalie:
+                _cfg = _gravita_cfg.get(_a.get("gravita", "info"), _default_cfg)
+                _titolo = _a.get("titolo", _a.get("categoria", ""))
+                _msg = _a.get("messaggio", _a.get("testo", ""))
+                st.markdown(
+                    f"""<div style="
+                        background:{_cfg['bg']};
+                        border:1px solid {_cfg['border']};
+                        border-radius:10px;padding:10px 14px;margin-bottom:8px;
+                        font-family:'Plus Jakarta Sans',sans-serif;font-size:0.88rem;
+                        color:rgba(220,230,255,0.90);">
+                        {_cfg['icon']} <b>{_titolo}</b> — {_msg}
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+        elif _ai_health.get("reachable"):
+            st.success("Nessuna anomalia rilevata sui dati attuali.")
+        else:
+            st.warning(_ai_health.get("message", "Gemini non disponibile."))
+        _sample = str(_ai_health.get("sample_response") or "").strip()
+        if _sample:
+            st.caption(f"Diagnostica Gemini: risposta test = `{_sample}`")
+
+    try:
+        _df_ob_home = _load_obiettivi_df(user_email, solo_attivi=True).copy()
+    except Exception:
+        _df_ob_home = pd.DataFrame()
+
+    if not _df_ob_home.empty:
+        _oggi_home = date.today()
+        _ob_gia_coperti = []
+        _ob_in_linea = []
+        _ob_a_rischio = []
+        _ob_falliti = []
+
+        for _, _obh in _df_ob_home.iterrows():
+            _obh_nome = _obh["nome"]
+            _ob_metrics = _compute_goal_metrics(
+                costo=float(_obh["costo"]),
+                accantonato_reale=float(_obh.get("accantonato_reale") or 0.0),
+                risparmio_mensile_dedicato=float(_obh["risparmio_mensile_dedicato"]),
+                scadenza=_obh.get("scadenza"),
+                today=_oggi_home,
+            )
+
+            if _ob_metrics["coperto_oggi"]:
+                _ob_gia_coperti.append({
+                    "nome": _obh_nome,
+                    "costo": _ob_metrics["costo"],
+                    "accantonato": _ob_metrics["accantonato_reale"],
+                    "id": int(_obh["id"]),
+                })
+                continue
+
+            if _ob_metrics["scadenza_date"] is None:
+                continue
+
+            if _ob_metrics["coperto_previsto"]:
+                _ob_in_linea.append({
+                    "nome": _obh_nome,
+                    "costo": _ob_metrics["costo"],
+                    "accantonato": _ob_metrics["accantonato_reale"],
+                    "totale_previsto": _ob_metrics["totale_previsto"],
+                    "scadenza": _ob_metrics["scadenza_label"],
+                })
+            elif _ob_metrics["giorni_rimanenti"] is not None and _ob_metrics["giorni_rimanenti"] < 0:
+                _ob_falliti.append({
+                    "nome": _obh_nome,
+                    "costo": _ob_metrics["costo"],
+                    "gap": _ob_metrics["gap_attuale"],
+                    "scadenza": _ob_metrics["scadenza_date"].strftime("%d/%m/%Y"),
+                    "id": int(_obh["id"]),
+                })
+            elif (
+                _ob_metrics["giorni_rimanenti"] is not None
+                and _ob_metrics["giorni_rimanenti"] <= 60
+                and _ob_metrics["gap_previsto"] > _ob_metrics["costo"] * 0.30
+            ):
+                _ob_a_rischio.append({
+                    "nome": _obh_nome,
+                    "costo": _ob_metrics["costo"],
+                    "accantonato": _ob_metrics["accantonato_reale"],
+                    "gap": _ob_metrics["gap_previsto"],
+                    "giorni": _ob_metrics["giorni_rimanenti"],
+                    "scadenza": _ob_metrics["scadenza_date"].strftime("%d/%m/%Y"),
+                })
+
+        if _ob_gia_coperti or _ob_in_linea or _ob_a_rischio or _ob_falliti:
+            with st.expander("🎯 Aggiornamenti sui tuoi obiettivi", expanded=True):
+                for _obc in _ob_gia_coperti:
+                    st.markdown(
+                        f"""<div style="
+                            background:rgba(16,217,138,0.10);
+                            border:1px solid rgba(16,217,138,0.40);
+                            border-radius:10px;padding:10px 14px;margin-bottom:8px;
+                            font-family:'Plus Jakarta Sans',sans-serif;font-size:0.88rem;
+                            color:rgba(220,230,255,0.90);">
+                            🏦 <b>{_obc['nome']}</b> — Obiettivo già coperto con risparmio reale.
+                            Hai già accantonato <b>{eur2(_obc['accantonato'])}</b>
+                            su un target di <b>{eur2(_obc['costo'])}</b>.
+                            Ricordati di segnarlo come completato nel tab Analisi.
+                        </div>""",
+                        unsafe_allow_html=True,
+                    )
+
+                for _obi in _ob_in_linea:
+                    st.markdown(
+                        f"""<div style="
+                            background:rgba(79,142,240,0.10);
+                            border:1px solid rgba(79,142,240,0.40);
+                            border-radius:10px;padding:10px 14px;margin-bottom:8px;
+                            font-family:'Plus Jakarta Sans',sans-serif;font-size:0.88rem;
+                            color:rgba(220,230,255,0.90);">
+                            🎯 <b>{_obi['nome']}</b> — In linea con il piano.
+                            Hai già accantonato <b>{eur2(_obi['accantonato'])}</b> e,
+                            continuando con il dedicato mensile, arriverai a
+                            <b>{eur2(_obi['totale_previsto'])}</b> entro <b>{_obi['scadenza']}</b>.
+                        </div>""",
+                        unsafe_allow_html=True,
+                    )
+
+                for _obar in _ob_a_rischio:
+                    st.markdown(
+                        f"""<div style="
+                            background:rgba(251,146,60,0.10);
+                            border:1px solid rgba(251,146,60,0.42);
+                            border-radius:10px;padding:10px 14px;margin-bottom:8px;
+                            font-family:'Plus Jakarta Sans',sans-serif;font-size:0.88rem;
+                            color:rgba(220,230,255,0.90);">
+                            ⚠️ <b>{_obar['nome']}</b> — A rischio!
+                            Mancano <b>{_obar['giorni']} giorni</b> alla scadenza
+                            ({_obar['scadenza']}) ma il gap residuo è ancora
+                            <b>{eur2(_obar['gap'])}</b>.
+                            Al momento hai accantonato <b>{eur2(_obar['accantonato'])}</b>.
+                            Considera di aumentare il risparmio mensile dedicato.
+                        </div>""",
+                        unsafe_allow_html=True,
+                    )
+
+                for _obf in _ob_falliti:
+                    _obf_cols = st.columns([5, 1.4])
+                    with _obf_cols[0]:
+                        st.markdown(
+                            f"""<div style="
+                                background:rgba(239,68,68,0.10);
+                                border:1px solid rgba(239,68,68,0.45);
+                                border-radius:10px;padding:10px 14px;
+                                font-family:'Plus Jakarta Sans',sans-serif;font-size:0.88rem;
+                                color:rgba(220,230,255,0.90);">
+                                ❌ <b>{_obf['nome']}</b> — Scadenza superata ({_obf['scadenza']}).
+                                Gap non colmato: <b>{eur2(_obf['gap'])}</b>.
+                                Puoi aggiornare la scadenza o eliminare l'obiettivo dal tab Analisi.
+                            </div>""",
+                            unsafe_allow_html=True,
+                        )
+                    with _obf_cols[1]:
+                        if st.button("🗑️ Elimina", key=f"ob_home_del_{_obf['id']}", use_container_width=True):
+                            db.elimina_obiettivo(_obf["id"], user_email=user_email)
+                            _invalidate_runtime_caches(obiettivi=True)
+                            st.rerun()
+
     mesi_labels = list(MONTH_SHORT.values())
+    _perc_att = _get_percentuali_budget_cached(user_email)
  
     c1, c2 = st.columns([1.35, 1.2])
  
     with c1:
         st.markdown("<div class='panel-title'>📊 Budget di spesa (50/30/20)</div>", unsafe_allow_html=True)
         if not df_budget.empty:
-            from utils.constants import PERCENTUALI_BUDGET
-            # Ordine categorie e mesi (Gen in alto = reverso per Plotly Y bottom-up)
-            cat_order   = list(PERCENTUALI_BUDGET.keys())
-            # Plotly asse Y categorico: categoryarray[0] = bottom → passiamo Dic→Gen così Gen arriva in cima
+            cat_order = list(_perc_att.keys())
             _y_order    = list(reversed(mesi_labels))   # ["Dic","Nov",...,"Gen"]
             fig_budget  = go.Figure()
 
             for cat in cat_order:
                 df_cat   = df_budget[df_budget["Categoria"] == cat].set_index("Mese").reindex(mesi_labels)
-                budget_c = df_cat["BudgetCategoria"].fillna(budget_base * PERCENTUALI_BUDGET[cat])
+                budget_c = df_cat["BudgetCategoria"].fillna(budget_base * _perc_att[cat])
                 speso    = df_cat["Speso"].fillna(0)
                 residuo  = (budget_c - speso).clip(lower=0)
                 spesa_ok = speso.where(speso <= budget_c, budget_c)
                 extra    = (speso - budget_c).clip(lower=0)
                 col_bright, col_dark = Colors.BUDGET_COLORS[cat]
-
-                # Segmento residuo
                 fig_budget.add_bar(
                     x=list(residuo), y=mesi_labels, orientation="h", width=0.70,
                     name=f"{cat}", marker_color=col_bright,
@@ -898,7 +2554,6 @@ with tab_home:
                     textfont=dict(color="#0B1020", size=13, weight="bold",family="'Plus Jakarta Sans',sans-serif"),
                     hovertemplate=f"<b>{cat} residuo</b>: €%{{x:.0f}}<extra></extra>",
                 )
-                # Segmento spesa (colore pieno, etichetta bianca)
                 fig_budget.add_bar(
                     x=list(spesa_ok), y=mesi_labels, orientation="h", width=0.70,
                     name=cat, marker_color=col_dark,
@@ -908,8 +2563,6 @@ with tab_home:
                     textfont=dict(color="#ffffff", size=18, weight="bold",family="'Plus Jakarta Sans',sans-serif"),
                     hovertemplate=f"<b>{cat} speso</b>: €%{{x:,.0f}}<extra></extra>",
                 )
-                
-                # Segmento extra sforamento (rosso, con etichetta e triangolino ⚠)
                 if extra.sum() > 0:
                     fig_budget.add_bar(
                         x=list(extra), y=mesi_labels, orientation="h", width=0.70,
@@ -948,7 +2601,7 @@ with tab_home:
             )
             st.plotly_chart(fig_budget, use_container_width=True, config=PLOTLY_CONFIG)
         else:
-            st.info("Imposta 'budget_mensile_base' nelle impostazioni rapide.")
+            st.info("Imposta 'budget mensile base' nelle impostazioni rapide.")
  
     with c2:
         st.markdown("<div class='panel-title'>📂 Dettaglio spese per categoria</div>", unsafe_allow_html=True)
@@ -1078,44 +2731,402 @@ with tab_charts:
     st.markdown("<div class='panel-title'>🔮 Previsione saldo</div>", unsafe_allow_html=True)
     df_prev = log.previsione_saldo(df_mov, anno_sel, saldo_iniziale=saldo_iniziale, mese_riferimento=mese_sel)
     if not df_prev.empty:
-    # 1. Recuperiamo l'ultimo punto del Reale per "agganciarlo" alla Previsione
-        df_reale = df_prev[df_prev["Tipo"] == "Reale"]
+        ordine_mesi_prev = [MONTH_SHORT.get(m, str(m)) for m in range(1, 13)]
+        df_reale = df_prev[df_prev["Tipo"] == "Reale"].sort_values("MeseNum")
         ultimo_punto_reale = df_reale.iloc[[-1]] if not df_reale.empty else None
-
         _tipos = df_prev["Tipo"].unique()
-        _colors_prev = {"Reale": "#4f8ef0", "Previsione": "#f5a623"} # Nota: corretto da Proiezione a Previsione
-        
+        _colors_prev = {"Reale": "#4f8ef0", "Previsione": "#f5a623"}
         fig_prev = go.Figure()
-        
+
+        _df_band = df_prev[df_prev["Tipo"] == "Previsione"][["Mese", "MeseNum", "SaldoMin", "SaldoMax"]].copy()
+        _df_band = _df_band.sort_values("MeseNum")
+        if not _df_band.empty and _df_band["SaldoMin"].notna().any():
+            if ultimo_punto_reale is not None:
+                _anchor_band = ultimo_punto_reale[["Mese", "MeseNum", "Saldo"]].copy()
+                _anchor_band["SaldoMin"] = _anchor_band["Saldo"]
+                _anchor_band["SaldoMax"] = _anchor_band["Saldo"]
+                _df_band = pd.concat(
+                    [_anchor_band[["Mese", "MeseNum", "SaldoMin", "SaldoMax"]], _df_band],
+                    ignore_index=True,
+                )
+            fig_prev.add_trace(go.Scatter(
+                x=_df_band["Mese"],
+                y=_df_band["SaldoMax"],
+                mode="lines",
+                line=dict(width=0),
+                hoverinfo="skip",
+                showlegend=False,
+            ))
+            fig_prev.add_trace(go.Scatter(
+                x=_df_band["Mese"],
+                y=_df_band["SaldoMin"],
+                mode="lines",
+                line=dict(color=hex_to_rgba(_colors_prev["Previsione"], 0.50), width=1, dash="dot"),
+                fill="tonexty",
+                fillcolor=hex_to_rgba(_colors_prev["Previsione"], 0.14),
+                name="Intervallo ±1σ",
+                hovertemplate="Limite stimato: € %{y:,.0f}<extra></extra>",
+            ))
+
         for _tipo in _tipos:
-            _df_t = df_prev[df_prev["Tipo"] == _tipo].copy()
-            
-            # 2. SE è la Previsione, aggiungiamo in testa l'ultimo punto del Reale
+            _df_t = df_prev[df_prev["Tipo"] == _tipo].copy().sort_values("MeseNum")
             if _tipo == "Previsione" and ultimo_punto_reale is not None:
                 _df_t = pd.concat([ultimo_punto_reale, _df_t]).drop_duplicates(subset=["Mese"], keep="last")
-                # Nota: 'keep="last"' serve se per caso Aprile esiste in entrambi, 
-                # ma l'aggancio serve per la linea continua.
-
+                _df_t = _df_t.sort_values("MeseNum")
             _color = _colors_prev.get(str(_tipo), "#f5a623")
             _y = _df_t["Saldo"].tolist()
-            _text = [eur0(v) for v in _y] 
-
             fig_prev.add_trace(go.Scatter(
-                x=_df_t["Mese"], y=_y, name=str(_tipo),
+                x=_df_t["Mese"],
+                y=_y,
+                name=str(_tipo),
                 mode="lines+markers+text",
                 line=dict(color=_color, width=3, dash="dash" if _tipo == "Previsione" else "solid"),
-                fill="tozeroy", 
-                fillcolor=hex_to_rgba(_color, 0.05),
+                fill="tozeroy" if _tipo == "Reale" else None,
+                fillcolor=hex_to_rgba(_color, 0.05) if _tipo == "Reale" else None,
                 marker=dict(color=_color, size=6),
-                text=_text, 
+                text=[eur0(v) for v in _y],
                 textposition="top center",
                 textfont=dict(size=10, color=_color),
             ))
+        fig_prev.update_xaxes(categoryorder="array", categoryarray=ordine_mesi_prev)
         fig_prev.update_yaxes(tickprefix="€ ", tickformat=",.0f")
         style_fig(fig_prev, height=320, show_legend=True)
         st.plotly_chart(fig_prev, use_container_width=True, config=PLOTLY_CONFIG)
+
+        _row_dic = df_prev[df_prev["MeseNum"] == 12]
+        if not _row_dic.empty and not df_reale.empty:
+            _mese_cutoff = int(df_reale["MeseNum"].max())
+            _row_dic_0 = _row_dic.iloc[0]
+            _saldo_osservato_prev = float(df_reale["Saldo"].iloc[-1])
+            _saldo_dicembre_prev = float(_row_dic_0["Saldo"])
+            _delta_previsto = float(_row_dic_0.get("DeltaPrevisto") or 0.0)
+            _entrate_attese_prev = float(_row_dic_0.get("EntrateAttese") or 0.0)
+            _uscite_attese_prev = float(_row_dic_0.get("UsciteAttese") or 0.0)
+            _metodo_prev = str(_row_dic_0.get("Metodo") or "")
+            _insight_prev = _genera_insight_previsione(
+                anno=int(anno_sel),
+                mese_cutoff=_mese_cutoff,
+                saldo_osservato=_saldo_osservato_prev,
+                saldo_dicembre=_saldo_dicembre_prev,
+                delta_previsto=_delta_previsto,
+                entrate_attese=_entrate_attese_prev,
+                uscite_attese=_uscite_attese_prev,
+                metodo=_metodo_prev,
+            )
+            if _insight_prev:
+                st.caption(_insight_prev)
+
+            _ai_key = f"_forecast_ai_expl_{anno_sel}_{_mese_cutoff}"
+            _ai_btn_col, _ai_txt_col = st.columns([1.2, 4.8], gap="small")
+            with _ai_btn_col:
+                if st.button("Spiega con AI", key=f"btn{_ai_key}", use_container_width=True):
+                    with st.spinner("Sto leggendo la previsione..."):
+                        st.session_state[_ai_key] = _genera_spiegazione_previsione_ai(
+                            anno=int(anno_sel),
+                            mese_cutoff=_mese_cutoff,
+                            saldo_osservato=_saldo_osservato_prev,
+                            saldo_dicembre=_saldo_dicembre_prev,
+                            delta_previsto=_delta_previsto,
+                            entrate_attese=_entrate_attese_prev,
+                            uscite_attese=_uscite_attese_prev,
+                            metodo=_metodo_prev,
+                        )
+            with _ai_txt_col:
+                _ai_text = st.session_state.get(_ai_key)
+                if _ai_text:
+                    st.caption(_ai_text)
+
+            if _mese_cutoff < 12:
+                with st.expander("🧪 Simula saldo what-if", expanded=False):
+                    st.caption("Questa simulazione non modifica la previsione base. Serve solo a confrontare uno scenario alternativo.")
+                    _mese_start_default = min(max(_mese_cutoff + 1, 1), 12)
+                    _what_if_key = f"_what_if_forecast_{anno_sel}"
+                    _what_if_saved = st.session_state.get(_what_if_key, {})
+                    _what_if_options = list(range(_mese_start_default, 13))
+                    _what_if_saved_month = int(_what_if_saved.get("mese_inizio", _mese_start_default))
+                    if _what_if_saved_month not in _what_if_options:
+                        _what_if_saved_month = _mese_start_default
+                    _what_if_index = _what_if_options.index(_what_if_saved_month)
+
+                    with st.form(key=f"form_what_if_{anno_sel}"):
+                        _wf_cols = st.columns(4, gap="small")
+                        _wf_mese = _wf_cols[0].selectbox(
+                            "Da quale mese?",
+                            options=_what_if_options,
+                            index=_what_if_index,
+                            format_func=lambda m: MONTH_NAMES.get(int(m), str(m)),
+                        )
+                        _wf_entrate = _wf_cols[1].number_input(
+                            "Entrate mensili scenario (€)",
+                            min_value=0.0,
+                            value=float(_what_if_saved.get("entrate_attese", _entrate_attese_prev)),
+                            step=50.0,
+                        )
+                        _wf_uscite = _wf_cols[2].number_input(
+                            "Uscite mensili scenario (€)",
+                            min_value=0.0,
+                            value=float(_what_if_saved.get("uscite_attese", _uscite_attese_prev)),
+                            step=50.0,
+                        )
+                        _wf_una_tantum = _wf_cols[3].number_input(
+                            "Una tantum al mese di avvio (€)",
+                            value=float(_what_if_saved.get("una_tantum", 0.0)),
+                            step=100.0,
+                            help="Usa un valore positivo per un bonus, negativo per una spesa straordinaria.",
+                        )
+                        _wf_submit = st.form_submit_button("Aggiorna scenario", use_container_width=True)
+
+                    if _wf_submit:
+                        st.session_state[_what_if_key] = {
+                            "mese_inizio": int(_wf_mese),
+                            "entrate_attese": float(_wf_entrate),
+                            "uscite_attese": float(_wf_uscite),
+                            "una_tantum": float(_wf_una_tantum),
+                        }
+
+                    _what_if_params = st.session_state.get(_what_if_key)
+                    if _what_if_params:
+                        _df_scenario = _simula_scenario_previsione(
+                            df_prev=df_prev,
+                            mese_inizio=int(_what_if_params["mese_inizio"]),
+                            entrate_attese=float(_what_if_params["entrate_attese"]),
+                            uscite_attese=float(_what_if_params["uscite_attese"]),
+                            una_tantum=float(_what_if_params.get("una_tantum", 0.0)),
+                        )
+                        if not _df_scenario.empty:
+                            _scenario_dic = _df_scenario[_df_scenario["MeseNum"] == 12]
+                            if not _scenario_dic.empty:
+                                _saldo_dic_scenario = float(_scenario_dic["SaldoScenario"].iloc[0])
+                                _delta_vs_base = _saldo_dic_scenario - _saldo_dicembre_prev
+
+                                fig_wf = go.Figure()
+                                fig_wf.add_trace(go.Scatter(
+                                    x=df_prev["Mese"],
+                                    y=df_prev["Saldo"],
+                                    name="Previsione base",
+                                    mode="lines+markers",
+                                    line=dict(color="#f5a623", width=3, dash="dash"),
+                                    marker=dict(color="#f5a623", size=6),
+                                ))
+                                fig_wf.add_trace(go.Scatter(
+                                    x=_df_scenario["Mese"],
+                                    y=_df_scenario["SaldoScenario"],
+                                    name="Scenario",
+                                    mode="lines+markers",
+                                    line=dict(color="#10d98a", width=3),
+                                    marker=dict(color="#10d98a", size=6),
+                                ))
+                                fig_wf.update_xaxes(categoryorder="array", categoryarray=ordine_mesi_prev)
+                                fig_wf.update_yaxes(tickprefix="€ ", tickformat=",.0f")
+                                show_chart(fig_wf, height=280, show_legend=True)
+
+                                st.caption(
+                                    f"Scenario da {MONTH_NAMES.get(int(_what_if_params['mese_inizio']), _what_if_params['mese_inizio'])}: "
+                                    f"saldo previsto a dicembre {eur2(_saldo_dic_scenario)} "
+                                    f"({eur2(_delta_vs_base, signed=True)} rispetto alla previsione base)."
+                                )
     else:
         st.info("Dati insufficienti per la previsione saldo.")
+
+    st.divider()
+    st.markdown(
+        """
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+          <span style="font-size:18px;">🎯</span>
+          <span class="section-title" style="margin-bottom:0;">OBIETTIVI FINANZIARI</span>
+        </div>
+        <p style="color:rgba(220,200,255,0.50);font-size:12px;margin-bottom:16px;">
+          Definisci i tuoi traguardi economici e monitora sia l'accantonato reale,
+          sia la proiezione futura basata sul risparmio mensile dedicato.
+          Gli obiettivi vengono utilizzati anche dall'assistente AI per risponderti in modo più preciso.
+        </p>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    _df_ob = _load_obiettivi_df(user_email, solo_attivi=False).copy()
+
+    with st.expander("➕ Aggiungi nuovo obiettivo", expanded=False):
+        with st.form("form_nuovo_obiettivo", clear_on_submit=True):
+            _oc1, _oc2 = st.columns(2)
+            _ob_nome = _oc1.text_input("Descrizione *", placeholder="Es. Vacanza Giappone")
+            _ob_costo = _oc2.number_input("Costo target (€) *", min_value=0.0, step=50.0, format="%.2f")
+            _oc3, _oc4, _oc5, _oc6, _oc7 = st.columns(5)
+            _ob_senza_scadenza = _oc3.checkbox("Senza scadenza", value=False)
+            _ob_scad = None if _ob_senza_scadenza else _oc4.date_input("Scadenza", min_value=date.today())
+            _ob_acc = _oc5.number_input(
+                "Accantonato reale (€)",
+                min_value=0.0,
+                step=50.0,
+                format="%.2f",
+                help="Quanto hai già realmente messo da parte per questo obiettivo",
+            )
+            _ob_ded = _oc6.number_input(
+                "Risparmio mensile dedicato (€)",
+                min_value=0.0,
+                step=10.0,
+                format="%.2f",
+                help="Quanto prevedi di dedicare ogni mese da oggi in avanti",
+            )
+            _ob_note = _oc7.text_input("Note", placeholder="Opzionale")
+
+            if st.form_submit_button("💾 Salva obiettivo", use_container_width=True):
+                if not _ob_nome or _ob_costo <= 0:
+                    st.error("Descrizione e costo sono obbligatori.")
+                else:
+                    _new_id = db.salva_obiettivo(
+                        nome=_ob_nome,
+                        costo=_ob_costo,
+                        scadenza=_ob_scad,
+                        accantonato_reale=_ob_acc,
+                        risparmio_mensile_dedicato=_ob_ded,
+                        note=_ob_note,
+                        user_email=user_email,
+                    )
+                    if _new_id:
+                        _invalidate_runtime_caches(obiettivi=True)
+                        st.success(f"✅ Obiettivo '{_ob_nome}' salvato.")
+                        st.rerun()
+                    else:
+                        st.error("Errore nel salvataggio dell'obiettivo.")
+
+    if _df_ob.empty:
+        st.info("Nessun obiettivo ancora. Aggiungine uno con il form qui sopra.")
+    else:
+        _oggi_ob = date.today()
+        _df_attivi = _df_ob[_df_ob["completato"] == False].copy()
+        _df_compl = _df_ob[_df_ob["completato"] == True].copy()
+
+        for _, _ob_row in _df_attivi.iterrows():
+            _ob_id = int(_ob_row["id"])
+            _ob_name = _ob_row["nome"]
+            _ob_metrics = _compute_goal_metrics(
+                costo=float(_ob_row["costo"]),
+                accantonato_reale=float(_ob_row.get("accantonato_reale") or 0.0),
+                risparmio_mensile_dedicato=float(_ob_row["risparmio_mensile_dedicato"]),
+                scadenza=_ob_row["scadenza"],
+                today=_oggi_ob,
+            )
+            _ob_cost = _ob_metrics["costo"]
+            _ob_acc_v = _ob_metrics["accantonato_reale"]
+            _ob_ded_v = _ob_metrics["dedicato_mensile"]
+            _ob_note_v = str(_ob_row.get("note") or "")
+            _ob_scad_v = _ob_row["scadenza"]
+            _scad_lbl = _ob_metrics["scadenza_label"]
+            _mesi_rim = _ob_metrics["mesi_rimanenti"]
+            _perc_reale = _ob_metrics["perc_reale"]
+            _perc_prev = _ob_metrics["perc_previsto"]
+            _tot_prev = _ob_metrics["totale_previsto"]
+            _gap_att = _ob_metrics["gap_attuale"]
+            _gap_prev = _ob_metrics["gap_previsto"]
+            _vers_prev = _ob_metrics["versamenti_previsti"]
+            _coperto_oggi = _ob_metrics["coperto_oggi"]
+            _coperto_prev = _ob_metrics["coperto_previsto"]
+            _gap_icon = "🟢" if _coperto_prev else ("🟡" if _gap_prev < _ob_cost * 0.3 else "🔴")
+
+            with st.container(border=True):
+                _hc1, _hc2 = st.columns([6, 2])
+                with _hc1:
+                    st.markdown(f"**{_ob_name}**")
+                    _cap_parts = [
+                        f"Target: **{eur2(_ob_cost)}**",
+                        f"Scadenza: **{_scad_lbl}**",
+                        f"Accantonato: **{eur2(_ob_acc_v)}**",
+                        f"Dedicato: **{eur2(_ob_ded_v)}/mese**",
+                    ]
+                    if _ob_note_v:
+                        _cap_parts.append(f"_{_ob_note_v}_")
+                    st.caption(" · ".join(_cap_parts))
+                with _hc2:
+                    if _coperto_oggi:
+                        _gap_lbl = "🏦 Già finanziato"
+                    elif _coperto_prev:
+                        _gap_lbl = "✅ In linea"
+                    elif _mesi_rim is None:
+                        _gap_lbl = f"🟡 Gap attuale: {eur2(_gap_att)}"
+                    else:
+                        _gap_lbl = f"{_gap_icon} Gap previsto: {eur2(_gap_prev)}"
+                    st.markdown(f"<div style='text-align:right;font-weight:600;'>{_gap_lbl}</div>", unsafe_allow_html=True)
+                    if _mesi_rim is not None:
+                        st.markdown(
+                            f"<div style='text-align:right;font-size:0.80em;color:rgba(180,200,240,0.55);'>{_mesi_rim} mesi rimanenti · versamenti previsti {eur2(_vers_prev)}</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                st.progress(
+                    int(_perc_reale),
+                    text=f"{_perc_reale:.0f}% del target già coperto dall'accantonato reale",
+                )
+                if _mesi_rim is not None:
+                    st.progress(
+                        int(_perc_prev),
+                        text=f"{_perc_prev:.0f}% previsto a scadenza con il piano attuale",
+                    )
+                    if _coperto_prev:
+                        st.caption(
+                            f"Totale previsto entro la scadenza: {eur2(_tot_prev)}. "
+                            f"Gap attuale: {eur2(_gap_att)}."
+                        )
+                    else:
+                        st.caption(
+                            f"Totale previsto entro la scadenza: {eur2(_tot_prev)}. "
+                            f"Gap attuale: {eur2(_gap_att)} · gap previsto: {eur2(_gap_prev)}."
+                        )
+                else:
+                    st.caption(
+                        f"Gap attuale: {eur2(_gap_att)}. "
+                        "Senza scadenza la proiezione futura non viene stimata automaticamente."
+                    )
+
+                _ac1, _ac2, _ac3, _ = st.columns([1.5, 1.5, 1.5, 5])
+                if _ac1.button("✅ Completato", key=f"ob_compl_{_ob_id}", use_container_width=True):
+                    db.segna_obiettivo_completato(_ob_id, user_email=user_email)
+                    _invalidate_runtime_caches(obiettivi=True)
+                    st.rerun()
+                if _ac2.button("🗑️ Elimina", key=f"ob_del_{_ob_id}", use_container_width=True):
+                    db.elimina_obiettivo(_ob_id, user_email=user_email)
+                    _invalidate_runtime_caches(obiettivi=True)
+                    st.rerun()
+                if _ac3.button("✏️ Modifica", key=f"ob_edit_btn_{_ob_id}", use_container_width=True):
+                    st.session_state[f"ob_edit_open_{_ob_id}"] = not st.session_state.get(f"ob_edit_open_{_ob_id}", False)
+
+                if st.session_state.get(f"ob_edit_open_{_ob_id}", False):
+                    with st.form(f"form_ob_edit_{_ob_id}"):
+                        _ec1, _ec2 = st.columns(2)
+                        _e_nome = _ec1.text_input("Descrizione", value=_ob_name)
+                        _e_costo = _ec2.number_input("Costo (€)", value=_ob_cost, step=50.0, format="%.2f")
+                        _ec3, _ec4, _ec5, _ec6, _ec7 = st.columns(5)
+                        _e_senza_scad = _ec3.checkbox("Senza scadenza", value=pd.isna(_ob_scad_v), key=f"ob_edit_noscad_{_ob_id}")
+                        _e_scad = None if _e_senza_scad else _ec4.date_input(
+                            "Scadenza",
+                            value=pd.to_datetime(_ob_scad_v).date() if pd.notna(_ob_scad_v) else date.today(),
+                            key=f"ob_edit_scad_{_ob_id}",
+                        )
+                        _e_acc = _ec5.number_input("Accantonato reale (€)", value=_ob_acc_v, step=50.0, format="%.2f")
+                        _e_ded = _ec6.number_input("Dedicato (€/mese)", value=_ob_ded_v, step=10.0, format="%.2f")
+                        _e_note = _ec7.text_input("Note", value=_ob_note_v)
+                        if st.form_submit_button("💾 Aggiorna"):
+                            db.aggiorna_obiettivo(
+                                _ob_id,
+                                _e_nome,
+                                _e_costo,
+                                _e_scad,
+                                _e_acc,
+                                _e_ded,
+                                _e_note,
+                                user_email=user_email,
+                            )
+                            _invalidate_runtime_caches(obiettivi=True)
+                            st.session_state[f"ob_edit_open_{_ob_id}"] = False
+                            st.rerun()
+
+        if not _df_compl.empty:
+            with st.expander(f"🏆 Obiettivi completati ({len(_df_compl)})", expanded=False):
+                for _, _cr in _df_compl.iterrows():
+                    _data_compl = pd.to_datetime(_cr["aggiornato_il"]).strftime("%d/%m/%Y")
+                    st.markdown(
+                        f"~~{_cr['nome']}~~ — {eur2(float(_cr['costo']))} · completato il {_data_compl}"
+                    )
  
  
 # ============================================================
@@ -1174,9 +3185,9 @@ with tab_assets:
                     f"color:{_ppcolor};'>{_arrow} {_pperc}%</div>"
                 )
             _pc.markdown(
-                f"""<div style="background:#0c1120;border:1px solid rgba(92,118,178,0.22);
-                border-radius:14px;padding:18px 14px 14px;text-align:center;
-                box-shadow:0 4px 20px rgba(0,0,0,0.4),0 0 24px {_pglow};position:relative;overflow:hidden;">
+                f"""<div style="background:rgba(255,255,255,0.04);backdrop-filter:blur(16px) saturate(150%);-webkit-backdrop-filter:blur(16px) saturate(150%);border:1px solid rgba(92,118,178,0.22);
+                border-radius:16px;padding:22px 18px 18px;text-align:center;
+                box-shadow:0 4px 28px rgba(0,0,0,0.45),0 0 32px {_glow};position:relative;overflow:hidden;">
   <div style="font-size:0.80rem;font-weight:700;letter-spacing:1.4px;text-transform:uppercase;
     color:rgba(180,200,240,0.55);margin-bottom:8px;">{_pl}</div>
   <div style="font-family:'JetBrains Mono',monospace;font-size:1.40rem;font-weight:700;color:{_pcolor};">{_pv}</div>
@@ -1251,7 +3262,23 @@ with tab_assets:
     st.divider()
  
     # Fondo pensione
-    st.markdown("<div class='panel-title'>🏦 Fondo Pensione</div>", unsafe_allow_html=True)
+    _fp_title_col, _fp_badge_col = st.columns([3, 2])
+    with _fp_title_col:
+        st.markdown("<div class='panel-title'>🏦 Fondo Pensione</div>", unsafe_allow_html=True)
+    with _fp_badge_col:
+        if _quota_live and _quota_live > 0:
+            st.markdown(
+                f"<div style='text-align:right'>"
+                f"{badge_html(f'🟢 NAV {_quota_live:.3f} € · {_quota_data}', 'badge-red')}"
+                f"<div style='font-size:0.72rem;color:rgba(180,200,240,0.40);margin-top:2px;'>"
+                f"PreviDoc/Teleborsa · {_quota_ts}</div></div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f"<div style='text-align:right'>{badge_html('⚠️ Quota da DB · aggiornamento offline', 'badge-red')}</div>",
+                unsafe_allow_html=True,
+            )
     valore_quota = fondo_valore_quota_corrente
     q_fondo      = fondo_quote_corrente
     inv_fondo    = fondo_capitale_base_corrente
@@ -1292,9 +3319,9 @@ with tab_assets:
                     f"color:{_fpcolor};'>{_arrow} {_fperc}%</div>"
                 )
             _fc.markdown(
-                f"""<div style="background:#0c1120;border:1px solid rgba(92,118,178,0.22);
-                border-radius:14px;padding:10px 10px 10px;text-align:center;
-                box-shadow:0 4px 20px rgba(0,0,0,0.4),0 0 24px {_fglow};position:relative;overflow:hidden;">
+                f"""<div style="background:rgba(255,255,255,0.04);backdrop-filter:blur(16px) saturate(150%);-webkit-backdrop-filter:blur(16px) saturate(150%);border:1px solid rgba(92,118,178,0.22);
+                border-radius:16px;padding:22px 18px 18px;text-align:center;
+                box-shadow:0 4px 28px rgba(0,0,0,0.45),0 0 32px {_glow};position:relative;overflow:hidden;">
   <div style="font-size:0.80rem;font-weight:700;letter-spacing:1.4px;text-transform:uppercase;
     color:rgba(180,200,240,0.55);margin-bottom:8px;">{_fl}</div>
   <div style="font-family:'JetBrains Mono',monospace;font-size:1.40rem;font-weight:700;color:{_fcolor};">{_fv}</div>
@@ -1365,7 +3392,7 @@ with tab_assets:
         fig_fondo.update_xaxes(rangemode="tozero", range=[0, None])
         st.plotly_chart(fig_fondo, use_container_width=True, config=PLOTLY_CONFIG)
     else:
-        st.info("Imposta valore quota e quote fondo nelle impostazioni rapide.")
+        st.info("Imposta codice fondo e quote nelle impostazioni rapide per visualizzare il fondo pensione.")
  
     st.divider()
  
@@ -1374,7 +3401,7 @@ with tab_assets:
     with r1:
         st.markdown("<div class='panel-title'>Composizione portafoglio</div>", unsafe_allow_html=True)
         comp = log.composizione_portafoglio(
-            float(saldo_disponibile), float(saldo_revolut_set),
+            float(saldo_disponibile), float(Saldo_conto_secondario_set),
             valore_pac_attuale, valore_fondo_attuale,
         )
         if comp:
@@ -1608,9 +3635,9 @@ with tab_debts:
         _dk_cols = st.columns(4)
         for _dc, (_dl, _dv, _dcolor, _dglow) in zip(_dk_cols, _d_kpis):
             _dc.markdown(
-                f"""<div style="background:#0c1120;border:1px solid rgba(92,118,178,0.22);
-                border-radius:14px;padding:18px 14px 14px;text-align:center;
-                box-shadow:0 4px 20px rgba(0,0,0,0.4),0 0 24px {_dglow};position:relative;overflow:hidden;margin-bottom:4px;">
+                f"""<div style="background:rgba(255,255,255,0.04);backdrop-filter:blur(16px) saturate(150%);-webkit-backdrop-filter:blur(16px) saturate(150%);border:1px solid rgba(92,118,178,0.22);
+                border-radius:16px;padding:22px 18px 18px;text-align:center;
+                box-shadow:0 4px 28px rgba(0,0,0,0.45),0 0 32px {_glow};position:relative;overflow:hidden;">
   <div style="font-size:0.80rem;font-weight:700;letter-spacing:1.4px;text-transform:uppercase;
     color:rgba(180,200,240,0.55);margin-bottom:8px;">{_dl}</div>
   <div style="font-family:'JetBrains Mono',monospace;font-size:1.40rem;font-weight:700;color:{_dcolor};">{_dv}</div>
@@ -1707,7 +3734,7 @@ with tab_debts:
  
  
 # ============================================================
-# TAB 5 — REGISTRO
+# TAB 5 — TRANSAZIONI
 # ============================================================
 with tab_admin:
     st.markdown("<div class='section-title'>Registro</div>", unsafe_allow_html=True)
@@ -1726,8 +3753,9 @@ with tab_admin:
         col_tipo, col_cat, col_det, col_data = st.columns([1, 1, 1.5, 1])
         tipo_inserito     = col_tipo.radio("Tipo movimento", ["↑ Uscita", "↓ Entrata"], horizontal=True, key="reg_tipo_radio")
         tipo_val          = "USCITA" if "Uscita" in tipo_inserito else "ENTRATA"
-        categoria_scelta  = col_cat.selectbox("Categoria", list(STRUTTURA_CATEGORIE.keys()), key="reg_categoria")
-        dettagli_filtrati = STRUTTURA_CATEGORIE[categoria_scelta]
+        _struttura_cat = _get_struttura_categorie_cached(user_email)
+        categoria_scelta  = col_cat.selectbox("Categoria", list(_struttura_cat.keys()), key="reg_categoria")
+        dettagli_filtrati = _struttura_cat[categoria_scelta]
         dettaglio_scelto  = col_det.selectbox("Dettaglio", dettagli_filtrati, key="reg_dettaglio")
         data_inserita     = col_data.date_input("Data", datetime.now(), key="reg_data")
  
@@ -1747,12 +3775,14 @@ with tab_admin:
                         st.session_state.get("reg_dettaglio", dettaglio_scelto),
                         importo_inserito, note_inserite, user_email=user_email,
                     )
+                    _invalidate_runtime_caches(movimenti=True)
                     st.session_state["_banner_mov"] = True
                     for k in ["reg_importo", "reg_note", "reg_data"]:
                         st.session_state.pop(k, None)
                     st.rerun()
                 except Exception as exc:
-                    st.error(f"Errore salvataggio: {exc}")
+                    logger.error("Errore registrazione movimento per %s: %s", user_email, exc)
+                    st.error("Errore durante il salvataggio del movimento. Riprova.")
         if col_ann.button("Annulla", key="btn_annulla_mov", use_container_width=True):
             for k in ["reg_importo", "reg_note", "reg_data"]:
                 st.session_state.pop(k, None)
@@ -1760,7 +3790,7 @@ with tab_admin:
  
     # ── Spese ricorrenti ──
     with st.container(border=True):
-        df_ric_view = db.carica_spese_ricorrenti(user_email)
+        df_ric_view = _load_spese_ricorrenti_df(user_email).copy()
         n_ric = len(df_ric_view) if not df_ric_view.empty else 0
         st.markdown(f"""<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
   <span style="font-size:13px;font-weight:700;color:#dde6f5;">🔁 Spese Ricorrenti</span>
@@ -1785,12 +3815,14 @@ with tab_admin:
                 if descrizione and importo_ric > 0:
                     try:
                         db.aggiungi_spesa_ricorrente(descrizione, importo_ric, giorno_scad, freq_val, data_inizio, data_fine, user_email=user_email)
+                        _invalidate_runtime_caches(ricorrenti=True)
                         for k in ["ric_desc", "ric_importo", "ric_giorno"]:
                             st.session_state.pop(k, None)
                         st.session_state["_banner_ric"] = True
                         st.rerun()
                     except Exception as exc:
-                        st.error(f"Errore: {exc}")
+                        logger.error("Errore salvataggio spesa ricorrente per %s: %s", user_email, exc)
+                        st.error("Errore durante il salvataggio della spesa ricorrente. Riprova.")
                 else:
                     st.warning("Inserisci descrizione e importo.")
  
@@ -1825,6 +3857,7 @@ with tab_admin:
                 cc1, cc2 = st.columns(2)
                 if cc1.button("🗑️ Sì, elimina", key="confirm_del_ric", use_container_width=True, type="primary"):
                     db.elimina_spesa_ricorrente(sid, user_email=user_email)
+                    _invalidate_runtime_caches(ricorrenti=True)
                     del st.session_state["pending_delete_ric"]
                     st.session_state["_success_ric_ts"] = datetime.now().timestamp()
                     st.rerun()
@@ -1865,12 +3898,14 @@ with tab_admin:
                     try:
                         db.aggiungi_finanziamento(nome_fin, capitale, taeg, durata, data_inizio_fin,
                             giorno_scad_fin, rate_pagate=int(rate_pagate_input) or None, user_email=user_email)
+                        _invalidate_runtime_caches(finanziamenti=True)
                         for k in ["fin_nome","fin_capitale","fin_taeg","fin_durata","fin_rate","fin_giorno"]:
                             st.session_state.pop(k, None)
                         st.success("✅ Finanziamento salvato!")
                         st.rerun()
                     except Exception as exc:
-                        st.error(f"Errore: {exc}")
+                        logger.error("Errore salvataggio finanziamento per %s: %s", user_email, exc)
+                        st.error("Errore durante il salvataggio del finanziamento. Riprova.")
                 else:
                     st.warning("Compila nome, capitale e durata.")
  
@@ -1929,6 +3964,7 @@ with tab_admin:
                 cc1, cc2 = st.columns(2)
                 if cc1.button("🗑️ Sì, elimina", key="confirm_del_fin", use_container_width=True, type="primary"):
                     db.elimina_finanziamento(fnome, user_email=user_email)
+                    _invalidate_runtime_caches(finanziamenti=True)
                     del st.session_state["pending_delete_fin"]
                     st.session_state["_success_fin_ts"] = datetime.now().timestamp()
                     st.rerun()
@@ -2040,6 +4076,7 @@ with tab_admin:
             cc1, cc2 = st.columns(2)
             if cc1.button("🗑️ Sì, elimina", key="confirm_del_mov", use_container_width=True, type="primary"):
                 db.elimina_movimento(mid, user_email)
+                _invalidate_runtime_caches(movimenti=True)
                 del st.session_state["pending_delete_mov"]
                 st.session_state["_success_mov_ts"] = datetime.now().timestamp()
                 st.rerun()
@@ -2052,13 +4089,379 @@ with tab_admin:
                 st.success("✅ Movimento eliminato con successo.")
             else:
                 del st.session_state["_success_mov_ts"]
- 
-    # ── Backup ──
+# ============================================================
+# TAB 6 — IMPOSTAZIONI
+# ============================================================
+# Colori per categoria (usati nei badge e nelle preview card budget)
+_CAT_COLORS = {
+    "NECESSITÀ":   {"accent": "#4f8ef0", "bg": "rgba(79,142,240,0.12)",  "card": "rgba(79,142,240,0.08)"},
+    "SVAGO":       {"accent": "#f472b6", "bg": "rgba(244,114,182,0.12)", "card": "rgba(244,114,182,0.08)"},
+    "INVESTIMENTI":{"accent": "#10d98a", "bg": "rgba(16,217,138,0.12)",  "card": "rgba(16,217,138,0.08)"},
+}
+
+with tab_settings:
+    st.markdown(
+        "<div style='display:flex;align-items:center;gap:10px;margin-bottom:4px;'>"
+        "<span style='font-size:1.4rem;'>⚙️</span>"
+        "<span style='font-size:1.25rem;font-weight:700;color:#dde6f5;'>Impostazioni</span>"
+        "</div>"
+        "<p style='font-size:0.88rem;color:#5a6f8c;margin-bottom:20px;'>"
+        "Personalizza le categorie di spesa, la distribuzione del budget e gestisci il backup dei tuoi dati."
+        "</p>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Feedback banner (add/remove) ──────────────────────────────────────────
+    if st.session_state.get("_impost_ok"):
+        st.success(st.session_state.pop("_impost_ok"))
+    if st.session_state.get("_impost_err"):
+        st.error(st.session_state.pop("_impost_err"))
+
+    # ── Gestione Voci di Spesa ────────────────────────────────────────────────
     with st.container(border=True):
-        st.markdown("""<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
-  <span style="font-size:20px;font-weight:500;color:#dde6f5;">🗄️ Backup Dati</span>
-</div>""", unsafe_allow_html=True)
- 
+        st.markdown(
+            "<div style='display:flex;align-items:center;gap:8px;margin-bottom:6px;'>"
+            "<span style='font-size:1.1rem;'>🗂️</span>"
+            "<span style='font-size:0.97rem;font-weight:700;color:#dde6f5;'>Gestione Voci di Spesa</span>"
+            "</div>"
+            "<p style='font-size:0.82rem;color:#5a6f8c;margin-bottom:16px;'>"
+            "Aggiungi o rimuovi voci di dettaglio per ogni categoria. "
+            "Le voci <em>predefinite</em> non possono essere rimosse."
+            "</p>",
+            unsafe_allow_html=True,
+        )
+
+        # Selezione categoria via radio orizzontale
+        st.markdown("<div style='font-size:0.85rem;color:#8ba3c7;margin-bottom:6px;'>Seleziona categoria</div>", unsafe_allow_html=True)
+        _cat_sel = st.radio(
+            "cat_radio",
+            CATEGORIE_MODIFICABILI,
+            horizontal=True,
+            label_visibility="collapsed",
+            key="impost_cat_radio",
+        )
+
+        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+
+        # Carica struttura e custom per la categoria selezionata
+        _struttura_full = _get_struttura_categorie_cached(user_email)
+        _default_voci    = STRUTTURA_CATEGORIE.get(_cat_sel, [])
+        _default_lower   = {v.lower() for v in _default_voci}
+        _tutte_voci      = _struttura_full.get(_cat_sel, [])
+        _accent          = _CAT_COLORS[_cat_sel]["accent"]
+
+        col_lista, col_add = st.columns([1, 1], gap="large")
+
+        # ── Colonna sinistra: lista voci ──────────────────────────────────────
+        with col_lista:
+            st.markdown(
+                f"<div style='font-size:0.90rem;font-weight:700;color:#dde6f5;margin-bottom:10px;'>"
+                f"Voci in {_cat_sel}</div>",
+                unsafe_allow_html=True,
+            )
+            for _v in _tutte_voci:
+                _is_default = _v.lower() in _default_lower
+                if _is_default:
+                    st.markdown(
+                        f"<div style='display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid rgba(92,118,178,0.10);'>"
+                        f"<span style='color:#dde6f5;font-size:0.88rem;'>{escape(str(_v))}</span>"
+                        f"<span style='font-size:0.68rem;padding:1px 7px;border-radius:20px;"
+                        f"background:rgba(92,118,178,0.15);color:#5a6f8c;border:1px solid rgba(92,118,178,0.25);'>default</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    _col_v, _col_x = st.columns([5, 1], vertical_alignment="center")
+                    _col_v.markdown(
+                        f"<div style='color:#dde6f5;font-size:0.88rem;padding:4px 0;'>{escape(str(_v))}</div>",
+                        unsafe_allow_html=True,
+                    )
+                    if _col_x.button("✕", key=f"impost_rem_{_cat_sel}_{_v}", help=f"Rimuovi '{_v}'"):
+                        ok, msg = _rimuovi_dettaglio(_cat_sel, _v, user_email)
+                        _invalidate_runtime_caches(user_settings=True)
+                        st.session_state["_impost_ok" if ok else "_impost_err"] = msg
+                        st.rerun()
+
+        # ── Colonna destra: aggiungi voce ─────────────────────────────────────
+        with col_add:
+            st.markdown(
+                f"<div style='font-size:0.90rem;font-weight:700;color:#dde6f5;margin-bottom:10px;'>"
+                f"Aggiungi voce a {_cat_sel}</div>",
+                unsafe_allow_html=True,
+            )
+            _nuova_voce = st.text_input(
+                "nuova_voce",
+                placeholder=f"es. Abbonamento Palestra Elite",
+                label_visibility="collapsed",
+                key="impost_det_new",
+            )
+            if st.button("＋ Aggiungi", key="impost_btn_add", use_container_width=True, type="primary"):
+                ok, msg = _aggiungi_dettaglio(_cat_sel, _nuova_voce, user_email)
+                _invalidate_runtime_caches(user_settings=True)
+                st.session_state["_impost_ok" if ok else "_impost_err"] = msg
+                st.rerun()
+
+    # ── Distribuzione Budget Mensile ──────────────────────────────────────────
+    with st.container(border=True):
+        st.markdown(
+            "<div style='display:flex;align-items:center;gap:8px;margin-bottom:6px;'>"
+            "<span style='font-size:1.1rem;'>🎯</span>"
+            "<span style='font-size:0.97rem;font-weight:700;color:#dde6f5;'>Distribuzione Budget Mensile</span>"
+            "</div>"
+            "<p style='font-size:0.82rem;color:#5a6f8c;margin-bottom:16px;'>"
+            "Imposta la percentuale del reddito mensile da assegnare a ogni categoria. "
+            "La somma deve essere esattamente <strong style='color:#dde6f5;'>100%</strong>."
+            "</p>",
+            unsafe_allow_html=True,
+        )
+
+        # Carica percentuali correnti dal DB
+        _perc_correnti = _get_percentuali_budget_cached(user_email)
+
+        from utils.constants import PERCENTUALI_BUDGET as _DEF_PERC
+        _cats_perc = list(_DEF_PERC.keys())  # ["NECESSITÀ", "SVAGO", "INVESTIMENTI"]
+
+        # Slider per ciascuna categoria
+        col_n, col_s, col_i = st.columns(3)
+        _slider_cols = [col_n, col_s, col_i]
+        _slider_vals: dict[str, int] = {}
+
+        for _col_p, _cat_p in zip(_slider_cols, _cats_perc):
+            _acc = _CAT_COLORS[_cat_p]["accent"]
+            with _col_p:
+                st.markdown(
+                    f"<div style='font-size:0.80rem;font-weight:700;letter-spacing:1px;"
+                    f"color:{_acc};margin-bottom:4px;'>{_cat_p}</div>",
+                    unsafe_allow_html=True,
+                )
+                _default_int = int(round(_perc_correnti.get(_cat_p, _DEF_PERC[_cat_p]) * 100))
+                _slider_vals[_cat_p] = st.slider(
+                    _cat_p,
+                    min_value=0,
+                    max_value=100,
+                    value=_default_int,
+                    step=1,
+                    label_visibility="collapsed",
+                    key=f"impost_slider_{_cat_p}",
+                )
+
+        # Validazione totale
+        _totale_perc = sum(_slider_vals.values())
+        _valid = (_totale_perc == 100)
+        if _valid:
+            st.markdown(
+                "<div style='text-align:center;padding:10px;border-radius:10px;margin:10px 0;"
+                "background:rgba(16,217,138,0.10);border:1px solid rgba(16,217,138,0.30);'>"
+                "<span style='color:#10d98a;font-weight:700;font-size:0.92rem;'>"
+                f"✓ Totale: {_totale_perc}% — Distribuzione valida</span></div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                "<div style='text-align:center;padding:10px;border-radius:10px;margin:10px 0;"
+                "background:rgba(250,89,142,0.10);border:1px solid rgba(250,89,142,0.30);'>"
+                "<span style='color:#fa598e;font-weight:700;font-size:0.92rem;'>"
+                f"⚠ Totale: {_totale_perc}% — La somma deve essere 100%</span></div>",
+                unsafe_allow_html=True,
+            )
+
+        # Bottoni salva / ripristina
+        col_save_p, col_reset_p = st.columns([1, 1])
+        if col_save_p.button("💾 Salva percentuali", key="impost_btn_save_perc", use_container_width=True, type="primary", disabled=not _valid):
+            _new_perc = {cat: _slider_vals[cat] / 100.0 for cat in _cats_perc}
+            ok, msg = _salva_percentuali_budget(_new_perc, user_email)
+            _invalidate_runtime_caches(user_settings=True)
+            st.session_state["_impost_ok" if ok else "_impost_err"] = msg
+            st.rerun()
+        if col_reset_p.button("↩ Ripristina default (50/30/20)", key="impost_btn_reset_perc", use_container_width=True):
+            ok, msg = _ripristina_percentuali_default(user_email)
+            _invalidate_runtime_caches(user_settings=True)
+            st.session_state["_impost_ok" if ok else "_impost_err"] = msg
+            st.rerun()
+
+        # Preview card per categoria
+        st.markdown("<div style='font-size:0.82rem;color:#5a6f8c;margin-top:14px;margin-bottom:8px;'>Anteprima distribuzione:</div>", unsafe_allow_html=True)
+        _prev_cols = st.columns(3)
+        for _pc, _cat_p in zip(_prev_cols, _cats_perc):
+            _acc   = _CAT_COLORS[_cat_p]["accent"]
+            _cbg   = _CAT_COLORS[_cat_p]["card"]
+            _pval  = _slider_vals[_cat_p]
+            _is_def = (_perc_correnti.get(_cat_p, _DEF_PERC[_cat_p]) == _DEF_PERC[_cat_p])
+            _lbl   = "default" if _is_def else "personalizzato"
+            _pc.markdown(
+                f"<div style='border-radius:14px;padding:20px 16px;text-align:center;"
+                f"background:{_cbg};border:1px solid {_acc}33;'>"
+                f"<div style='font-size:0.72rem;font-weight:700;letter-spacing:1.5px;color:{_acc};margin-bottom:8px;'>{_cat_p}</div>"
+                f"<div style='font-size:2rem;font-weight:800;color:#ffffff;line-height:1.1;'>{_pval}%</div>"
+                f"<div style='font-size:0.70rem;color:#5a6f8c;margin-top:6px;'>{_lbl}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+    # ── Autenticazione a due fattori ──────────────────────────────────────────
+    with st.container(border=True):
+        st.markdown(
+            "<div style='display:flex;align-items:center;gap:8px;margin-bottom:6px;'>"
+            "<span style='font-size:1.1rem;'>🔐</span>"
+            "<span style='font-size:0.97rem;font-weight:700;color:#dde6f5;'>Autenticazione a due fattori (2FA)</span>"
+            "</div>"
+            "<p style='font-size:0.82rem;color:#5a6f8c;margin-bottom:16px;'>"
+            "Proteggi il tuo account con un codice temporaneo generato da Google Authenticator, Authy o app compatibili."
+            "</p>",
+            unsafe_allow_html=True,
+        )
+
+        _email_settings = user_email
+        _totp_attivo = is_totp_enabled(_email_settings)
+
+        if is_demo_account:
+            st.caption("Il 2FA non è disponibile per l'account demo.")
+        elif _totp_attivo:
+            st.success("✅ La verifica in due passaggi è attiva sul tuo account.")
+            if auth_provider == "google":
+                with st.expander("Disabilita 2FA"):
+                    st.caption(
+                        "Per gli account Google la disattivazione richiede una nuova conferma OAuth con lo stesso account."
+                    )
+                    if OAuth2Component is None:
+                        st.error("Modulo OAuth mancante. Impossibile confermare l'account Google.")
+                    elif not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+                        st.error("Credenziali OAuth Google mancanti.")
+                    else:
+                        redirect_uri = _redirect_uri()
+                        if not redirect_uri:
+                            st.error("APP_BASE_URL non configurato.")
+                        else:
+                            oauth2_totp_disable = OAuth2Component(
+                                GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+                                AUTHORIZE_URL, TOKEN_URL, TOKEN_URL, ""
+                            )
+                            result_totp_disable = _safe_google_authorize_button(
+                                oauth2_totp_disable,
+                                name="Conferma con Google per disabilitare",
+                                scope="openid email profile",
+                                redirect_uri=redirect_uri,
+                                key="google_totp_disable_confirm",
+                                use_container_width=True,
+                                extras_params={"prompt": "login", "login_hint": _email_settings},
+                            )
+                            if result_totp_disable:
+                                id_token = result_totp_disable.get("id_token")
+                                if not id_token and isinstance(result_totp_disable.get("token"), dict):
+                                    id_token = result_totp_disable["token"].get("id_token")
+                                email_google = _decode_id_token_email(id_token)
+                                if not email_google:
+                                    acc = result_totp_disable.get("access_token") or (result_totp_disable.get("token") or {}).get("access_token")
+                                    if acc:
+                                        from urllib.request import Request, urlopen
+                                        try:
+                                            req = Request(
+                                                "https://openidconnect.googleapis.com/v1/userinfo",
+                                                headers={"Authorization": f"Bearer {acc}"},
+                                            )
+                                            with urlopen(req, timeout=15) as resp:
+                                                payload = json.loads(resp.read())
+                                                email_google = str(payload.get("email", "")).strip().lower() or None
+                                        except Exception:
+                                            pass
+                                if email_google and email_google == str(_email_settings).strip().lower():
+                                    ok, msg = disable_totp_for_google_user(_email_settings)
+                                    _reset_google_oauth_state("google_totp_disable_confirm")
+                                    _clear_query_params()
+                                    if ok:
+                                        st.success(msg)
+                                        st.rerun()
+                                    else:
+                                        st.error(msg)
+                                elif email_google:
+                                    st.error("Hai confermato un account Google diverso da quello loggato.")
+            else:
+                with st.expander("Disabilita 2FA"):
+                    _pwd_disable = st.text_input(
+                        "Conferma la tua password per disabilitare",
+                        type="password",
+                        key="totp_disable_pwd",
+                    )
+                    if st.button("Disabilita autenticazione a due fattori", type="secondary", key="btn_totp_disable"):
+                        ok, msg = disable_totp_for_user(_email_settings, _pwd_disable)
+                        if ok:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+        else:
+            st.info(
+                "La verifica in due passaggi non è attiva. "
+                "Aggiunge un livello di sicurezza extra: oltre al primo login, "
+                "sarà richiesto un codice temporaneo dall'app Authenticator."
+            )
+            if auth_provider == "google":
+                st.caption("Sugli account Google il codice TOTP verrà richiesto dopo il login OAuth, come secondo passaggio.")
+            if st.button("⚙️ Configura autenticazione a due fattori", type="primary", key="btn_totp_setup_start"):
+                st.session_state["totp_setup_active"] = True
+
+            if st.session_state.get("totp_setup_active"):
+                if "totp_setup_secret" not in st.session_state:
+                    try:
+                        secret, uri = setup_totp_begin(_email_settings)
+                        st.session_state["totp_setup_secret"] = secret
+                        st.session_state["totp_setup_uri"] = uri
+                    except AuthError as e:
+                        st.error(str(e))
+                        st.session_state.pop("totp_setup_active", None)
+                        st.session_state.pop("totp_setup_secret", None)
+                        st.session_state.pop("totp_setup_uri", None)
+
+                secret = st.session_state.get("totp_setup_secret", "")
+                uri = st.session_state.get("totp_setup_uri", "")
+                if secret and uri:
+                    st.markdown("**1. Scansiona il QR code con Google Authenticator o Authy:**")
+
+                    import io
+                    import qrcode
+
+                    qr_img = qrcode.make(uri)
+                    buf = io.BytesIO()
+                    qr_img.save(buf, format="PNG")
+                    st.image(buf.getvalue(), width=220)
+
+                    with st.expander("Non riesci a scansionare? Inserisci il codice manualmente"):
+                        st.code(secret, language=None)
+
+                    st.markdown("**2. Inserisci il codice a 6 cifre mostrato dall'app per confermare:**")
+                    _totp_confirm_code = st.text_input(
+                        "Codice di conferma",
+                        max_chars=6,
+                        placeholder="000000",
+                        key="totp_confirm_input",
+                    )
+
+                    col_ok, col_cancel = st.columns(2)
+                    with col_ok:
+                        if st.button("Attiva 2FA", type="primary", use_container_width=True, key="btn_totp_enable"):
+                            if setup_totp_confirm(_email_settings, _totp_confirm_code):
+                                st.success("🎉 Autenticazione a due fattori attivata con successo!")
+                                for k in ("totp_setup_active", "totp_setup_secret", "totp_setup_uri", "totp_confirm_input"):
+                                    st.session_state.pop(k, None)
+                                st.rerun()
+                            else:
+                                st.error("Codice non valido. Riprova con il codice attuale dall'app.")
+                    with col_cancel:
+                        if st.button("Annulla", use_container_width=True, key="btn_totp_cancel"):
+                            for k in ("totp_setup_active", "totp_setup_secret", "totp_setup_uri", "totp_confirm_input"):
+                                st.session_state.pop(k, None)
+                            st.rerun()
+
+    # ── Backup Dati ───────────────────────────────────────────────────────────
+    with st.container(border=True):
+        st.markdown(
+            "<div style='display:flex;align-items:center;gap:8px;margin-bottom:6px;'>"
+            "<span style='font-size:1.1rem;'>🗄️</span>"
+            "<span style='font-size:0.97rem;font-weight:700;color:#dde6f5;'>Backup Dati</span>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
         @st.cache_data(ttl=300, show_spinner=False)
         def _genera_sql_backup(email: str) -> str | None:
             from backup import genera_sql_per_utente
@@ -2075,12 +4478,12 @@ with tab_admin:
                 return sql
             except Exception:
                 return None
- 
+
         sql_backup = _genera_sql_backup(user_email)
         col_txt, col_btn = st.columns([3, 1], vertical_alignment="center")
         col_txt.markdown(
-            "<div style='font-size:0.90rem;color:#5a6f8c;line-height:1.6;display:flex;align-items:center;height:100%;'>"
-            "Scarica una <strong style='color:#dde6f5;font-weight:600;margin:0 4px;'>copia completa</strong> dei tuoi dati in formato SQL. "
+            "<div style='font-size:0.90rem;color:#5a6f8c;line-height:1.6;'>"
+            "Scarica una <strong style='color:#dde6f5;font-weight:600;'>copia completa</strong> dei tuoi dati in formato SQL. "
             "Conservala in un posto sicuro — accessibile anche senza l'app."
             "</div>",
             unsafe_allow_html=True,

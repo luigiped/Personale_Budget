@@ -12,8 +12,13 @@ Import:
 
 import hashlib
 import logging
+from functools import lru_cache
 
 import bcrypt
+import pyotp
+from cryptography.fernet import Fernet, InvalidToken
+
+from config_runtime import get_secret
 
 logger = logging.getLogger(__name__)
 
@@ -69,3 +74,97 @@ def needs_rehash(stored_hash: str) -> bool:
     if not stored_hash:
         return False
     return not stored_hash.strip().startswith(_BCRYPT_PREFIX)
+
+
+# ---------------------------------------------------------------------------
+# TOTP helpers
+# ---------------------------------------------------------------------------
+
+_TOTP_ISSUER = "Personal Budget"
+_ENCRYPTION_PREFIX = "enc:"
+
+
+@lru_cache(maxsize=1)
+def _get_data_cipher() -> Fernet | None:
+    """
+    Restituisce il cipher applicativo per cifrare dati sensibili nel DB.
+    Richiede APP_DATA_ENCRYPTION_KEY in formato Fernet.
+    """
+    raw_key = get_secret("APP_DATA_ENCRYPTION_KEY")
+    if not raw_key:
+        logger.warning("APP_DATA_ENCRYPTION_KEY non configurata: cifratura applicativa disattiva.")
+        return None
+    try:
+        return Fernet(str(raw_key).strip().encode("utf-8"))
+    except Exception as exc:
+        logger.error("APP_DATA_ENCRYPTION_KEY non valida: %s", exc)
+        return None
+
+
+def generate_totp_secret() -> str:
+    """Genera un nuovo secret TOTP casuale in formato base32."""
+    return pyotp.random_base32()
+
+
+def encrypt_sensitive_value(value: str) -> str:
+    """
+    Cifra un valore sensibile per il DB.
+    Se la chiave applicativa non è configurata, restituisce il valore in chiaro
+    per compatibilità retroattiva.
+    """
+    raw = str(value or "")
+    cipher = _get_data_cipher()
+    if not raw or cipher is None:
+        return raw
+    return f"{_ENCRYPTION_PREFIX}{cipher.encrypt(raw.encode('utf-8')).decode('utf-8')}"
+
+
+def decrypt_sensitive_value(value: str) -> str | None:
+    """
+    Decifra un valore sensibile dal DB.
+    Supporta sia valori cifrati con prefisso `enc:` sia valori legacy in chiaro.
+    """
+    raw = str(value or "")
+    if not raw:
+        return ""
+    if not raw.startswith(_ENCRYPTION_PREFIX):
+        return raw
+    cipher = _get_data_cipher()
+    if cipher is None:
+        logger.error("Impossibile decifrare un valore sensibile: chiave applicativa assente.")
+        return None
+    try:
+        token = raw[len(_ENCRYPTION_PREFIX):].encode("utf-8")
+        return cipher.decrypt(token).decode("utf-8")
+    except (InvalidToken, ValueError) as exc:
+        logger.error("decrypt_sensitive_value: token non valido: %s", exc)
+        return None
+    except Exception as exc:
+        logger.error("decrypt_sensitive_value: errore inatteso: %s", exc)
+        return None
+
+
+def get_totp_uri(secret: str, email: str) -> str:
+    """
+    Restituisce l'URI otpauth:// da codificare nel QR code.
+    Compatibile con Google Authenticator, Authy, ecc.
+    """
+    totp = pyotp.TOTP(secret)
+    return totp.provisioning_uri(name=email, issuer_name=_TOTP_ISSUER)
+
+
+def verify_totp_code(secret: str, code: str) -> bool:
+    """
+    Verifica un codice TOTP a 6 cifre contro il secret.
+
+    valid_window=1 tollera uno skew di ±30 secondi sull'orologio del client.
+    Non solleva mai eccezioni: in caso di errore restituisce False e logga.
+    """
+    if not secret or not code:
+        return False
+    try:
+        totp = pyotp.TOTP(secret)
+        return totp.verify(str(code).strip(), valid_window=1)
+    except Exception as exc:
+        logger.error("verify_totp_code: errore inatteso: %s", exc)
+        return False

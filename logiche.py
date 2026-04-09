@@ -1,4 +1,3 @@
-import functools
 import threading
 import time
 import pandas as pd
@@ -83,19 +82,13 @@ PERCENTUALI_BUDGET = {
 }
 
 #Regola determinazione budget mensile
-def budget_mensile(stipendio):
-    # Applica la regola 50/30/20
-    necessità = stipendio * 0.5
-    svago = stipendio * 0.3
-    investimenti = stipendio * 0.2
+def budget_mensile(stipendio, percentuali_override=None):
+    percentuali = percentuali_override if percentuali_override is not None else PERCENTUALI_BUDGET
+    return {cat: round(stipendio * perc, 2) for cat, perc in percentuali.items()}
 
-    return { #mi restituisce il budget mensile per le categorie
-        "NECESSITÀ": necessità, 
-        "SVAGO": svago, 
-        "INVESTIMENTI": investimenti
-    }
 
-def calcola_avanzamento_budget(totale_entrate, df_uscite_mese):
+def calcola_avanzamento_budget(totale_entrate, df_uscite_mese, percentuali_override=None):
+    percentuali = percentuali_override if percentuali_override is not None else PERCENTUALI_BUDGET
     # 1. Calcoliamo quanto abbiamo speso finora per ogni categoria
     if df_uscite_mese.empty:
         spese_per_categoria = {}
@@ -106,7 +99,7 @@ def calcola_avanzamento_budget(totale_entrate, df_uscite_mese):
     risultati_budget = {}
 
     # 2. Per ogni categoria (Necessità, Svago, Inv), applichiamo la logica
-    for categoria, percentuale in PERCENTUALI_BUDGET.items():
+    for categoria, percentuale in percentuali.items():
         
         # A. Calcolo il Budget Teorico (Il tetto massimo)
         budget_disponibile = totale_entrate * percentuale
@@ -756,14 +749,23 @@ def versamenti_asset(df_transazioni, anno):
 
 def previsione_saldo(df_transazioni, anno, saldo_iniziale=0.0, mese_riferimento=None):
     """
-    Calcola il saldo reale mensile e usa la regressione lineare 
-    per prevedere il saldo dei mesi futuri dell'anno.
+    Calcola il saldo reale mensile e proietta i mesi futuri con una logica
+    prudente basata sui flussi recenti.
+
+    Principi:
+      - il saldo storico resta sempre quello reale cumulato
+      - i mesi futuri usano entrate/uscite attese, non il saldo cumulativo
+      - se non risultano entrate recenti confermate, le entrate attese future
+        vengono azzerate per evitare crescite "inventate"
+      - slope/R² restano come indicatori descrittivi dello storico, non come
+        unico motore della previsione
     """
-    nomi_mesi = {1:'Gen', 2:'Feb', 3:'Mar', 4:'Apr', 5:'Mag', 6:'Giu', 
-                 7:'Lug', 8:'Ago', 9:'Set', 10:'Ott', 11:'Nov', 12:'Dic'}
-    
-    # 1. Calcolo il saldo netto mensile reale (Entrate - Uscite)
-    #    fino al mese di riferimento (mese selezionato in UI oppure mese corrente).
+    nomi_mesi = {
+        1:'Gen', 2:'Feb', 3:'Mar', 4:'Apr', 5:'Mag', 6:'Giu',
+        7:'Lug', 8:'Ago', 9:'Set', 10:'Ott', 11:'Nov', 12:'Dic'
+    }
+
+    # ── 1. Preparazione dati ───────────────────────────────────────────────
     df_anno = df_transazioni[df_transazioni['Data'].dt.year == anno].copy()
     if df_anno.empty:
         return pd.DataFrame()
@@ -780,53 +782,119 @@ def previsione_saldo(df_transazioni, anno, saldo_iniziale=0.0, mese_riferimento=
     if df_anno.empty:
         return pd.DataFrame()
 
+    # ── 2. Delta mensili (risparmio per mese) ─────────────────────────────
+    entrate_raw = df_anno[df_anno['Tipo'] == TIPO_ENTRATA].groupby(
+        df_anno[df_anno['Tipo'] == TIPO_ENTRATA]['Data'].dt.month
+    )['Importo'].sum()
+    uscite_raw = df_anno[df_anno['Tipo'] == TIPO_USCITA].groupby(
+        df_anno[df_anno['Tipo'] == TIPO_USCITA]['Data'].dt.month
+    )['Importo'].apply(lambda s: s.abs().sum())
     mensile_raw = df_anno.groupby(df_anno['Data'].dt.month).apply(
-        lambda x: x[x['Tipo'] == TIPO_ENTRATA]['Importo'].sum() - x[x['Tipo'] == TIPO_USCITA]['Importo'].abs().sum()
+        lambda x: (
+            x[x['Tipo'] == TIPO_ENTRATA]['Importo'].sum()
+            - x[x['Tipo'] == TIPO_USCITA]['Importo'].abs().sum()
+        )
     )
-    # Mesi 1..mese_cutoff: i mesi senza movimenti mantengono saldo invariato (netto mese = 0).
-    mensile = mensile_raw.reindex(range(1, mese_cutoff + 1), fill_value=0.0)
+    mesi_con_dati = sorted(int(m) for m in mensile_raw.index.tolist())
+    if len(mesi_con_dati) < 2:
+        return pd.DataFrame()
+
+    ultimo_mese_reale = int(max(mesi_con_dati))
+    mensile = mensile_raw.reindex(range(1, ultimo_mese_reale + 1), fill_value=0.0)
+    entrate_mensili = entrate_raw.reindex(range(1, ultimo_mese_reale + 1), fill_value=0.0)
+    uscite_mensili = uscite_raw.reindex(range(1, ultimo_mese_reale + 1), fill_value=0.0)
     saldi_reali_serie = mensile.cumsum() + saldo_iniziale
-    saldi_reali = saldi_reali_serie.tolist()
-    
-    # 3. LOGICA DI REGRESSIONE LINEARE
-    # X = numeri dei mesi reali (1..mese_cutoff), Y = saldo cumulativo.
-    # Richiediamo almeno 2 mesi effettivamente osservati nel registro.
-    if len(mensile_raw.index.tolist()) > 1:
-        x = np.arange(1, mese_cutoff + 1, dtype=float)
-        y = np.array(saldi_reali)
-        
-        # Calcoliamo i parametri della retta: y = mx + q
-        m, q = np.polyfit(x, y, 1)
-        
-        # 4. Proiettiamo per tutti i 12 mesi.
-        ultimo_mese_reale = mese_cutoff
-        ultimo_saldo_reale = float(saldi_reali_serie.iloc[-1])
-        
-        proiezione_totale = []
-        for m_num in range(1, 13):
-            nome_mese = nomi_mesi[m_num]
-            
-            if m_num <= ultimo_mese_reale:
-                # Dati storici: restano identici
-                tipo = "Reale"
-                valore = float(saldi_reali_serie.loc[m_num])
-            else:
-                # PREVISIONE AGGANCIATA:
-                # Partiamo dall'ultimo saldo reale e aggiungiamo il risparmio medio (m)
-                # per ogni mese di distanza dal presente.
-                tipo = "Previsione"
-                mesi_di_distanza = m_num - ultimo_mese_reale
-                valore = ultimo_saldo_reale + (m * mesi_di_distanza)
-            
+
+    # ── 3. Regressione sui delta mensili ──────────────────────────────────
+    delta_values = mensile.values
+    x_reg = np.arange(len(delta_values), dtype=float)
+    coeffs = np.polyfit(x_reg, delta_values, 1)
+    slope_delta = coeffs[0]
+
+    y_pred = np.polyval(coeffs, x_reg)
+    ss_res = np.sum((delta_values - y_pred) ** 2)
+    ss_tot = np.sum((delta_values - delta_values.mean()) ** 2)
+    r2 = float(1 - ss_res / ss_tot) if ss_tot > 1e-9 else 0.0
+    std_delta = float(np.std(delta_values, ddof=1)) if len(delta_values) > 1 else 0.0
+
+    # ── 4. Stima prudente entrate/uscite future ───────────────────────────
+    finestra_recenti = min(3, len(entrate_mensili))
+    entrate_recenti = entrate_mensili.iloc[-finestra_recenti:]
+    uscite_recenti = uscite_mensili.iloc[-finestra_recenti:]
+
+    entrate_recenti_pos = entrate_recenti[entrate_recenti > 1e-9]
+    uscite_recenti_pos = uscite_recenti[uscite_recenti > 1e-9]
+    uscite_storiche_pos = uscite_mensili[uscite_mensili > 1e-9]
+
+    ultimi_due_mesi = entrate_mensili.iloc[-min(2, len(entrate_mensili)):]
+    ha_entrate_confermate = len(ultimi_due_mesi) == 2 and bool((ultimi_due_mesi > 1e-9).all())
+
+    entrate_attese = (
+        float(entrate_recenti_pos.median())
+        if ha_entrate_confermate and not entrate_recenti_pos.empty
+        else 0.0
+    )
+    if not uscite_recenti_pos.empty:
+        uscite_attese = float(uscite_recenti_pos.median())
+    elif not uscite_storiche_pos.empty:
+        uscite_attese = float(uscite_storiche_pos.median())
+    else:
+        uscite_attese = 0.0
+
+    delta_cashflow = float(entrate_attese - uscite_attese)
+    if entrate_attese <= 1e-9:
+        delta_cashflow = min(delta_cashflow, 0.0)
+        metodo_previsione = "Cashflow prudente senza entrate recenti"
+    else:
+        metodo_previsione = "Cashflow stimato da entrate/uscite recenti"
+
+    # ── 5. Proiezione fino a dicembre ─────────────────────────────────────
+    ultimo_saldo_reale = float(saldi_reali_serie.iloc[-1])
+    proiezione_totale = []
+    saldo_prev_cumulativo = ultimo_saldo_reale
+
+    for m_num in range(1, 13):
+        nome_mese = nomi_mesi[m_num]
+
+        if m_num <= ultimo_mese_reale:
             proiezione_totale.append({
                 "Mese": nome_mese,
-                "Saldo": round(valore, 2),
-                "Tipo": tipo
+                "MeseNum": m_num,
+                "Saldo": round(float(saldi_reali_serie.loc[m_num]), 2),
+                "SaldoMin": None,
+                "SaldoMax": None,
+                "Tipo": "Reale",
+                "R2": round(r2, 3),
+                "SlopeDelta": round(slope_delta, 2),
+                "StdDelta": round(std_delta, 2),
+                "EntrateAttese": None,
+                "UsciteAttese": None,
+                "DeltaPrevisto": None,
+                "Metodo": "Storico reale",
             })
-        
-        return pd.DataFrame(proiezione_totale)
-    
-    return pd.DataFrame() # Ritorna vuoto se non ci sono abbastanza dati
+        else:
+            delta_previsto = float(delta_cashflow)
+            saldo_prev_cumulativo += delta_previsto
+            n_proiettati = m_num - ultimo_mese_reale
+            incertezza_cumulativa = std_delta * (n_proiettati ** 0.5)
+
+            proiezione_totale.append({
+                "Mese": nome_mese,
+                "MeseNum": m_num,
+                "Saldo": round(saldo_prev_cumulativo, 2),
+                "SaldoMin": round(saldo_prev_cumulativo - incertezza_cumulativa, 2),
+                "SaldoMax": round(saldo_prev_cumulativo + incertezza_cumulativa, 2),
+                "Tipo": "Previsione",
+                "R2": round(r2, 3),
+                "SlopeDelta": round(slope_delta, 2),
+                "StdDelta": round(std_delta, 2),
+                "EntrateAttese": round(entrate_attese, 2),
+                "UsciteAttese": round(uscite_attese, 2),
+                "DeltaPrevisto": round(delta_previsto, 2),
+                "Metodo": metodo_previsione,
+            })
+
+    return pd.DataFrame(proiezione_totale)
 
 # logica proiezione andamento PAC
 def prezzo_attuale_ETF(ticker):
@@ -1072,7 +1140,7 @@ def analisi_fondo_pensione(valore_quota, quote_base, capitale_base,
 
     tfr_versato_anno = float(tfr_versato_anno or 0.0)
 
-    # 1. RECUPERO VERSAMENTI ADERENTE DAL REGISTRO (solo DOPO lo snapshot)
+    # 1. RECUPERO VERSAMENTI ADERENTE ALLE TRANSAZIONI (solo DOPO lo snapshot)
     # Così evitiamo doppio conteggio con capitale_base che include già tutto fino allo snapshot
     df_fondo_delta = df_transazioni[
         (df_transazioni['Dettaglio'].str.contains("Fondo pensione", case=False, na=False)) &
@@ -1161,18 +1229,18 @@ def analisi_fondo_pensione(valore_quota, quote_base, capitale_base,
         "Grafico_Proiezione": pd.DataFrame(proiezioni)
     }
 # Composizione portafoglio
-def composizione_portafoglio(saldo_fineco, saldo_revolut, valore_attuale_pac, valore_attuale_fondo):
+def composizione_portafoglio(Saldo_conto_principale, Saldo_conto_secondario, valore_attuale_pac, valore_attuale_fondo):
     """
     Calcola il valore totale del portafoglio e la suddivisione percentuale.
     """
-    totale = saldo_fineco + saldo_revolut + valore_attuale_pac + valore_attuale_fondo
+    totale = Saldo_conto_principale + Saldo_conto_secondario + valore_attuale_pac + valore_attuale_fondo
     
     if totale == 0:
         return {}
 
     composizione = [
-        {"Asset": "Liquidità Fineco", "Valore": saldo_fineco, "Perc": round((saldo_fineco / totale) * 100, 1)},
-        {"Asset": "Liquidità Revolut", "Valore": saldo_revolut, "Perc": round((saldo_revolut / totale) * 100, 1)},
+        {"Asset": "Liquidità Fineco", "Valore": Saldo_conto_principale, "Perc": round((Saldo_conto_principale / totale) * 100, 1)},
+        {"Asset": "Liquidità Revolut", "Valore": Saldo_conto_secondario, "Perc": round((Saldo_conto_secondario / totale) * 100, 1)},
         {"Asset": "PAC", "Valore": valore_attuale_pac, "Perc": round((valore_attuale_pac / totale) * 100, 1)},
         {"Asset": "Fondo Pensione", "Valore": valore_attuale_fondo, "Perc": round((valore_attuale_fondo / totale) * 100, 1)}
     ]
@@ -1332,7 +1400,8 @@ def saldo_disponibile_da_inizio(df_transazioni, anno, mese, saldo_iniziale=0.0):
     uscite = df[df['Tipo'] == TIPO_USCITA]['Importo'].abs().sum()
     return round(saldo_iniziale + entrate - uscite, 2)
 
-def budget_spese_annuale(df_transazioni, anno, budget_mensile_base):
+def budget_spese_annuale(df_transazioni, anno, budget_mensile_base, percentuali_override=None):
+    percentuali = percentuali_override if percentuali_override is not None else PERCENTUALI_BUDGET
     """
     Prepara i dati per il grafico budget mensile (50/30/20).
     budget_mensile_base è il valore fisso su cui calcolare le percentuali.
@@ -1372,7 +1441,7 @@ def budget_spese_annuale(df_transazioni, anno, budget_mensile_base):
     mesi = range(1, 13)
     righe = []
     for m in mesi:
-        for cat, perc in PERCENTUALI_BUDGET.items():
+        for cat, perc in percentuali.items():
             speso = spese[(spese['MeseNum'] == m) & (spese['Categoria'] == cat)]['Importo'].sum()
             budget_cat = budget_mensile_base * perc
             residuo = budget_cat - speso

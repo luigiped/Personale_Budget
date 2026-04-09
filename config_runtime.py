@@ -119,22 +119,14 @@ def get_secret(name):
 
 def export_runtime_env():
     """
-    Esporta in os.environ le chiavi usate dai moduli legacy.
-    NOTA DEMO: puoi aggiungere qui le chiavi specifiche della demo se servono.
+    Esporta in os.environ solo le chiavi strettamente necessarie ai moduli legacy
+    che non leggono ancora da get_secret()/st.secrets.
     """
     keys = (
-        "SUPABASE_URL",
-        "SUPABASE_KEY",
         "DATABASE_URL",
         "DATABASE_URL_POOLER",
-        "GOOGLE_CLIENT_ID",
-        "GOOGLE_CLIENT_SECRET",
-        "GOOGLE_CLIENT_SECRET_JSON",
-        "GMAIL_TOKEN_SISTEMA",
-        "APP_BASE_URL",
-        "LOCAL_BASE_URL",
-        "APP_ENV",
         "AUTH_ACCESS_MODE",
+        "GEMINI_API_KEY",
     )
     for key in keys:
         value = get_secret(key)

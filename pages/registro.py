@@ -1,7 +1,7 @@
 """
 pages/registro.py
 -----------------
-Tab REGISTRO — Personal Budget Dashboard.
+Tab TRANSAZIONI — Personal Budget Dashboard.
 
 Sezioni:
   1. Nuova Transazione (form inserimento movimento)
@@ -20,8 +20,8 @@ import streamlit as st
 
 import Database as db
 import logiche as log
-from utils.constants import Colors, STRUTTURA_CATEGORIE, FREQ_OPTIONS, FREQ_MAP, PLOTLY_CONFIG
-from utils.formatters import format_eur, eur2, chip_html
+from utils.constants import Colors, STRUTTURA_CATEGORIE, FREQ_OPTIONS, FREQ_MAP
+from utils.formatters import format_eur, chip_html
 from utils.html_tables import scroll_table, render_ricorrenti_rows, _td, _tr
 
 
@@ -75,7 +75,7 @@ def render(ctx: dict) -> None:
     df_fin           = ctx["df_fin"]
     invalidate_cache = ctx["invalidate_cache"]
 
-    st.markdown("<div class='section-title'>REGISTRO</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>TRANSAZIONI</div>", unsafe_allow_html=True)
 
     # Banner successo post-rerun
     if st.session_state.pop("_banner_mov", False):
@@ -212,7 +212,7 @@ def render(ctx: dict) -> None:
                     del st.session_state["pending_delete_ric"]
                     st.rerun()
 
-            if "\_success_ric_ts" in st.session_state:
+            if "_success_ric_ts" in st.session_state:
                 if datetime.now().timestamp() - st.session_state["_success_ric_ts"] < 3:
                     st.success("✅ Spesa ricorrente eliminata.")
                 else:

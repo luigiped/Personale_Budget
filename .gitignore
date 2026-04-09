@@ -5,13 +5,19 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+
 # ── Ambienti virtuali ────────────────────────────────────────────────────────
 .venv/
 venv/
 env/
 ENV/
 # ── Streamlit ────────────────────────────────────────────────────────────────
-.streamlit/
+**/.streamlit/*
+# Esclude solo i file di configurazione, ma non l'intera cartella (per mantenere la struttura)
+!**/.streamlit/config.toml
+entrypoint.sh
+# Non caricare   secrets.toml
+**/.streamlit/secrets.toml
 # ── Token OAuth / credenziali ────────────────────────────────────────────────
 token/
 *.json
@@ -40,3 +46,9 @@ htmlcov/
 # ── Jupyter ──────────────────────────────────────────────────────────────────
 .ipynb_checkpoints/
 *.ipynb
+# ── secret_Outh_demo ──────────────────────────────────────────────────────────
+secret_Outh_demo/
+icon/icona_barra.png
+icon/logo_app.png
+icon/site.webmanifest
+update_dep.py

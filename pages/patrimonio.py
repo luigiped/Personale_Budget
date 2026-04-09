@@ -55,7 +55,7 @@ def render(ctx: dict) -> None:
     fondo_snap  = ctx["fondo_snap"]
 
     saldo_disp = ctx["saldo_disponibile"]
-    saldo_rev  = s_num("saldo_revolut", 0.0)
+    saldo_rev  = s_num("Saldo_conto_secondario", 0.0)
 
     st.markdown("<div class='section-title'>PATRIMONIO</div>", unsafe_allow_html=True)
 

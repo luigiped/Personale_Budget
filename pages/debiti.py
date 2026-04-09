@@ -20,7 +20,7 @@ from html import escape
 
 import logiche as log
 from utils.constants import Colors, PLOTLY_CONFIG
-from utils.formatters import eur0, eur2, format_eur, chip_html
+from utils.formatters import eur0, eur2
 from utils.charts import style_fig
 from utils.html_tables import scroll_table, _td, _tr
 

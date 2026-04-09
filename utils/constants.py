@@ -90,38 +90,43 @@ FREQ_MAP: dict[int, str] = {v: k for k, v in FREQ_OPTIONS.items()}
 # Colori tema dark indigo (usati dai grafici Plotly e dai componenti HTML)
 # ---------------------------------------------------------------------------
 class Colors:
-    BG          = "#07090F"
-    BG_SURF     = "#0c1120"
-    BG_CARD     = "#0c1120"
-    BG_FORM     = "#0F1628"
-    BG_INP      = "#090E1B"
+    # ── Sfondi ───────────────────────────────────────────────────────────────
+    BG          = "#06010f"
+    BG_SURF     = "rgba(255,255,255,0.05)"
+    BG_CARD     = "rgba(255,255,255,0.06)"
+    BG_FORM     = "rgba(255,255,255,0.04)"
+    BG_INP      = "rgba(139,92,246,0.10)"
 
-    ACCENT      = "#4f8ef0"
-    ACCENT_LT   = "#82b4f7"
+    # ── Accenti aurora ───────────────────────────────────────────────────────
+    ACCENT      = "#7c3aed"
+    ACCENT_LT   = "#c4b5fd"
 
-    GREEN       = "#10d98a"
+    # ── Semantici ────────────────────────────────────────────────────────────
+    GREEN        = "#10d98a"
     GREEN_BRIGHT = "#5ce488"
-    RED         = "#f13434"
-    RED_BRIGHT  = "#fa598e"
-    AMBER       = "#f5a623"
-    VIOLET      = "#9b74f5"
+    RED          = "#f26a6a"
+    RED_BRIGHT   = "#fb7185"
+    AMBER        = "#f5a623"
+    VIOLET       = "#a78bfa"
 
-    TEXT        = "#dde6f5"
-    TEXT_MID    = "#5a6f8c"
-    TEXT_DIM    = "rgba(180,200,240,0.55)"
+    # ── Testo ────────────────────────────────────────────────────────────────
+    TEXT        = "#f0e8ff"
+    TEXT_MID    = "rgba(220,200,255,0.55)"
+    TEXT_DIM    = "rgba(200,180,255,0.35)"
 
-    BORDER      = "rgba(92,118,178,0.20)"
-    BORDER_MD   = "rgba(112,143,215,0.34)"
+    # ── Bordi ────────────────────────────────────────────────────────────────
+    BORDER      = "rgba(255,255,255,0.10)"
+    BORDER_MD   = "rgba(139,92,246,0.38)"
 
-    # Sequenza colori grafici categoriali
-    SEQ = ["#facc15", "#60a5fa", "#34d399", "#fb7185", "#a78bfa", "#f472b6", "#22c55e"]
+    # ── Sequenza colori grafici categoriali (aurora palette) ─────────────────
+    SEQ = ["#c4b5fd", "#f9a8d4", "#6ee7b7", "#fde68a", "#93c5fd", "#fb7185", "#34d399"]
 
-    # Colori per categoria budget
+    # ── Colori per categoria budget ──────────────────────────────────────────
     BUDGET_COLORS: dict[str, tuple[str, str]] = {
-    "NECESSITÀ":    ("#4f8ef0", "#1d3a6e"),
-    "SVAGO":        ("#f472b6", "#6d2040"),
-    "INVESTIMENTI": ("#10d98a", "#0a4a36"),
-}
+        "NECESSITÀ":    ("#818cf8", "rgba(99,102,241,0.22)"),
+        "SVAGO":        ("#f472b6", "rgba(236,72,153,0.22)"),
+        "INVESTIMENTI": ("#34d399", "rgba(52,211,153,0.22)"),
+    }
 
 # ---------------------------------------------------------------------------
 # Configurazione Plotly

@@ -1,7 +1,7 @@
 import argparse
 import logging
 import os
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import pandas as pd
 import Database as db
@@ -363,5 +363,4 @@ def main():
 
 if __name__ == "__main__":
   main()
-
 

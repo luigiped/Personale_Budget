@@ -8,8 +8,7 @@ pronti per essere renderizzati da Streamlit (`st.plotly_chart`) o
 NiceGUI (`ui.plotly`).
 """
 
-import plotly.graph_objects as go
-from utils.constants import Colors, FONT_SANS, FONT_MONO, PLOTLY_CONFIG, MONTH_SHORT
+from utils.constants import Colors, FONT_SANS, MONTH_SHORT
  
 # Ordine canonico mesi Gen→Dic
 MONTH_ORDER = list(MONTH_SHORT.values())
@@ -45,24 +44,24 @@ def style_fig(fig, title=None, height=300, show_legend=True):
         )
     else:
         layout_kwargs["title_text"] = ""
- 
+
     fig.update_layout(**layout_kwargs)
- 
+
     fig.update_xaxes(
         showgrid=True,
-        gridcolor="rgba(79,142,240,0.08)",
+        gridcolor="rgba(139,92,246,0.10)",
         zeroline=False,
         tickfont=dict(size=11, color=Colors.TEXT, family=FONT_SANS),
         title_font=dict(color=Colors.TEXT),
-        linecolor="rgba(92,118,178,0.25)",
+        linecolor="rgba(139,92,246,0.18)",
     )
     fig.update_yaxes(
         showgrid=False,
-        gridcolor="rgba(79,142,240,0.08)",
+        gridcolor="rgba(139,92,246,0.10)",
         zeroline=False,
         tickfont=dict(size=11, color=Colors.TEXT, family=FONT_SANS),
         title_font=dict(color=Colors.TEXT),
-        linecolor="rgba(92,118,178,0.25)",
+        linecolor="rgba(139,92,246,0.18)",
     )
     return fig
  
