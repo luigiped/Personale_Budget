@@ -490,6 +490,29 @@ h1, h2, h3, h4, h5, h6 {
 .block-container { padding-top: 1.2rem !important; padding-bottom: 1rem !important; }
 .element-container { margin-bottom: 0rem; }
 
+@media (max-width: 768px) {
+    .block-container {
+        padding-top: 0.9rem !important;
+        padding-bottom: 1.1rem !important;
+    }
+    .element-container {
+        margin-bottom: 0.45rem !important;
+    }
+    [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+        margin-bottom: 0.8rem !important;
+    }
+    [data-testid="stHorizontalBlock"] > [data-testid="column"]:last-child {
+        margin-bottom: 0 !important;
+    }
+    div[data-testid="stMetric"] {
+        margin-bottom: 0.8rem !important;
+    }
+    html body [data-testid="stVerticalBlockBorderWrapper"] {
+        padding: 18px !important;
+        margin-bottom: 0.9rem !important;
+    }
+}
+
 /* ── CUSTOM CLASSES ──────────────────────────────────────────────────────── */
 .section-title {
     font-size: 1.25rem; font-family: 'Plus Jakarta Sans', sans-serif;
@@ -637,7 +660,10 @@ div[data-testid="stRadio"] > div[role="radiogroup"]:has(label:nth-child(3)) > la
     font-size: 0.82rem; color: #c4b5fd; white-space: nowrap;
 }
 .reg-html-scroll {
-    overflow-y: auto; overflow-x: hidden;
+    overflow-x: auto;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
     background: rgba(255,255,255,0.02);
 }
 .reg-html-scroll::-webkit-scrollbar { width: 6px; }
@@ -646,7 +672,9 @@ div[data-testid="stRadio"] > div[role="radiogroup"]:has(label:nth-child(3)) > la
     background: rgba(139,92,246,0.25); border-radius: 999px;
 }
 .reg-html-table {
-    width: 100%; border-collapse: collapse;
+    width: max-content;
+    min-width: 100%;
+    border-collapse: collapse;
     table-layout: auto; background: transparent;
 }
 .reg-html-table thead th {
@@ -687,6 +715,13 @@ div[data-testid="stRadio"] > div[role="radiogroup"]:has(label:nth-child(3)) > la
 }
 .reg-del-row-btn div.stButton > button:hover {
     background: rgba(242,106,106,0.20) !important;
+}
+
+@media (max-width: 768px) {
+    .reg-html-bar {
+        flex-wrap: wrap;
+        align-items: flex-start;
+    }
 }
 """
 
