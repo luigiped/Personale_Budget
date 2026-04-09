@@ -15,7 +15,6 @@ ENV/
 **/.streamlit/*
 # Esclude solo i file di configurazione, ma non l'intera cartella (per mantenere la struttura)
 !**/.streamlit/config.toml
-entrypoint.sh
 # Non caricare   secrets.toml
 **/.streamlit/secrets.toml
 # ── Token OAuth / credenziali ────────────────────────────────────────────────
