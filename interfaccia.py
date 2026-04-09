@@ -1,4 +1,8 @@
+##########################################################
+##### Personal Budget Dashboard - Interfaccia utente #####
+
 # streamlit run interfaccia.py
+
 import time
 import base64
 import importlib

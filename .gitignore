@@ -47,7 +47,4 @@ htmlcov/
 *.ipynb
 # ── secret_Outh_demo ──────────────────────────────────────────────────────────
 secret_Outh_demo/
-icon/icona_barra.png
-icon/logo_app.png
-icon/site.webmanifest
 update_dep.py
