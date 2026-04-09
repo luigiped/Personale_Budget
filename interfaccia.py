@@ -109,6 +109,18 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(f"<style>{CSS_ALL}</style>", unsafe_allow_html=True)
+
+APP_FOOTER_HTML = (
+    "<div style='width:100%;margin:40px 0 10px;padding-top:16px;"
+    "border-top:1px solid rgba(255,255,255,0.08);text-align:center;"
+    "font-size:0.78rem;letter-spacing:0.02em;color:rgba(220,200,255,0.55);'>"
+    "Copyright &copy; 2026 Luigi Pedace - DigitalSheets_LP. All rights reserved."
+    "</div>"
+)
+
+
+def _render_app_footer() -> None:
+    st.markdown(APP_FOOTER_HTML, unsafe_allow_html=True)
  
 # ---------------------------------------------------------------------------
 # Helpers cookie/session (layer Streamlit — responsabilità di questo file)
@@ -497,6 +509,7 @@ def _render_login_screen() -> None:
         # ── CLOSED: nessun tab, nessuna azione ───────────────────────────────
         if mode == "closed":
             st.warning("Accesso disabilitato. Riprova quando il servizio sarà riattivato.")
+            _render_app_footer()
             return
  
         user_flows_disabled = (mode == "demo_only")
@@ -779,7 +792,8 @@ def _render_login_screen() -> None:
  
         # ── Chiude il div login-glass-card ──────────────────────────────
         st.markdown("</div>", unsafe_allow_html=True)
- 
+
+    _render_app_footer()
     st.stop()
  
  
@@ -1215,7 +1229,7 @@ def _render_onboarding_wizard() -> None:
             "<div style='padding:28px 30px;border-radius:24px;"
             "background:rgba(9,15,29,0.86);border:1px solid rgba(92,118,178,0.24);"
             "box-shadow:0 18px 48px rgba(2,6,23,0.42);'>"
-            "<div style='display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;'>"
+            "<div style='display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px;'>"
             "<div>"
             "<div style='font-size:0.78rem;font-weight:700;letter-spacing:1.6px;text-transform:uppercase;color:#60a5fa;'>Primo accesso</div>"
             "<div style='font-size:1.65rem;font-weight:800;color:#f8fbff;margin-top:4px;'>Configura il tuo profilo finanziario</div>"
@@ -1226,6 +1240,7 @@ def _render_onboarding_wizard() -> None:
             unsafe_allow_html=True,
         )
 
+        st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
         step_cols = st.columns(total_steps)
         for idx, (col, label) in enumerate(zip(step_cols, labels), start=1):
             is_active = idx == step
@@ -1448,6 +1463,7 @@ def _render_onboarding_wizard() -> None:
 
         st.markdown("</div>", unsafe_allow_html=True)
 
+    _render_app_footer()
     st.stop()
 
 
@@ -4502,3 +4518,5 @@ with tab_settings:
             )
         else:
             col_btn.caption("Backup non disponibile.")
+
+_render_app_footer()
