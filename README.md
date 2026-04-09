@@ -39,7 +39,7 @@
 ### 🔐 Autenticazione e sicurezza
 - Registrazione e login email/password
 - Login con Google OAuth 2.0
-- 2FA TOTP opzionale (compatibile con Google Authenticator e Authy)
+- 2FA TOTP opzionale (compatibile con Google Authenticator, Microsoft Authenticator, Authy, ecc.)
 - Onboarding guidato al primo accesso
 - Reset password e eliminazione account
 
@@ -59,7 +59,7 @@ auth_manager.py         → autenticazione, sessioni, OAuth, 2FA
 security.py             → hashing password, TOTP, cifratura dati sensibili
 Database.py             → layer dati PostgreSQL, migrazioni, CRUD, rate limiting
 logiche.py              → business logic finanziaria
-config_runtime.py       → risoluzione configurazione e segreti
+config_runtime.py       → risoluzione configurazione
 gmail_sender.py         → invio email via Gmail API
 notification_worker.py  → job notifiche email
 backup.py               → job backup dati
