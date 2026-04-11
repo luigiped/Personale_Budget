@@ -224,7 +224,12 @@ def render(ctx: dict) -> None:
                 pc = Colors.GREEN if perc >= 50 else Colors.AMBER if perc >= 25 else Colors.RED
                 mc = Colors.RED   if mesi_r > 120 else Colors.AMBER if mesi_r > 36 else Colors.GREEN
                 debt_rows.append(_tr([
-                    _td(f"<strong>{escape(str(row['Nome']))}</strong>", color=Colors.TEXT, weight=600),
+                    _td(
+                        f"<strong>{escape(str(row['Nome']))}</strong>",
+                        color=Colors.TEXT,
+                        weight=600,
+                        title=str(row["Nome"]),
+                    ),
                     _td(eur2(row["Rata"]),    color=Colors.RED,  mono=True, weight=600),
                     _td(eur2(row["Residuo"]), color=Colors.TEXT, mono=True),
                     _td(f"{perc:.1f}%",       color=pc,          mono=True, align="center"),
@@ -232,9 +237,11 @@ def render(ctx: dict) -> None:
                 ]))
             st.markdown(scroll_table(
                 title="Riepilogo finanziamenti", right_html="",
-                columns=[("Nome","left"),("Rata","center"),("Residuo","center"),("% Compl.","center"),("Mesi","left")],
-                widths=[1.4, 1.1, 1.5, 0.9, 0.7],
+                columns=[("Nome","left"),("Rata","center"),("Resid.","center"),("%","center"),("Mesi","center")],
+                widths=[1.0, 0.92, 1.0, 0.58, 0.5],
                 rows_html=debt_rows, height_px=230,
+                min_table_width_px=0,
+                shell_class="reg-html-compact reg-html-fin-summary",
             ), unsafe_allow_html=True)
         else:
             st.info("Nessun finanziamento trovato.")
