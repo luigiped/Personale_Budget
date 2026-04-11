@@ -309,6 +309,31 @@ def _ensure_auth_rate_limits_table(cursor) -> None:
     )
 
 
+def _ensure_totp_recovery_tokens_table(cursor) -> None:
+    """Crea la tabella OTP per il recovery 2FA se mancante."""
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS totp_recovery_tokens (
+            id              SERIAL PRIMARY KEY,
+            email           TEXT NOT NULL REFERENCES utenti_registrati(email) ON DELETE CASCADE,
+            challenge_token TEXT NOT NULL,
+            provider        TEXT NOT NULL,
+            otp             TEXT NOT NULL,
+            expires_at      TIMESTAMPTZ NOT NULL,
+            used            BOOLEAN DEFAULT FALSE,
+            created_at      TIMESTAMPTZ DEFAULT NOW()
+        )"""
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_trt_email ON totp_recovery_tokens (email)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_trt_expires ON totp_recovery_tokens (expires_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_trt_challenge ON totp_recovery_tokens (challenge_token)"
+    )
+
+
 def _migrate_plaintext_totp_secrets(cursor) -> int:
     """
     Cifra eventuali secret TOTP legacy ancora salvati in chiaro.
@@ -477,6 +502,21 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
         )""",
         "CREATE INDEX IF NOT EXISTS idx_auth_rate_limits_last_attempt ON auth_rate_limits (last_attempt_at)",
     ]),
+    (16, "Creazione tabella recovery 2FA via email", [
+        """CREATE TABLE IF NOT EXISTS totp_recovery_tokens (
+            id              SERIAL PRIMARY KEY,
+            email           TEXT NOT NULL REFERENCES utenti_registrati(email) ON DELETE CASCADE,
+            challenge_token TEXT NOT NULL,
+            provider        TEXT NOT NULL,
+            otp             TEXT NOT NULL,
+            expires_at      TIMESTAMPTZ NOT NULL,
+            used            BOOLEAN DEFAULT FALSE,
+            created_at      TIMESTAMPTZ DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_trt_email ON totp_recovery_tokens (email)",
+        "CREATE INDEX IF NOT EXISTS idx_trt_expires ON totp_recovery_tokens (expires_at)",
+        "CREATE INDEX IF NOT EXISTS idx_trt_challenge ON totp_recovery_tokens (challenge_token)",
+    ]),
 ]
 
 
@@ -564,6 +604,7 @@ def inizializza_db() -> None:
             _ensure_pending_2fa_table(cursor)
             _ensure_active_sessions_schema(cursor)
             _ensure_auth_rate_limits_table(cursor)
+            _ensure_totp_recovery_tokens_table(cursor)
             _applica_migrazioni(cursor)
             migrated_totp = _migrate_plaintext_totp_secrets(cursor)
             if migrated_totp:
@@ -580,6 +621,9 @@ def pulisci_sessioni_scadute() -> None:
                 _ensure_pending_2fa_table(cursor)
                 cursor.execute("DELETE FROM pending_2fa_challenges WHERE expires_at < NOW()")
                 challenge_2fa = cursor.rowcount
+                _ensure_totp_recovery_tokens_table(cursor)
+                cursor.execute("DELETE FROM totp_recovery_tokens WHERE expires_at < NOW() OR used = TRUE")
+                recovery_2fa = cursor.rowcount
                 _ensure_auth_rate_limits_table(cursor)
                 cursor.execute(
                     "DELETE FROM auth_rate_limits "
@@ -591,10 +635,10 @@ def pulisci_sessioni_scadute() -> None:
                     "WHERE inviato_il < NOW() - INTERVAL '90 days'"
                 )
                 notifiche = cursor.rowcount
-        if sessioni > 0 or challenge_2fa > 0 or rate_limits > 0 or notifiche > 0:
+        if sessioni > 0 or challenge_2fa > 0 or recovery_2fa > 0 or rate_limits > 0 or notifiche > 0:
             logger.info(
-                "Pulizia DB: %d sessioni scadute, %d challenge 2FA scadute, %d rate limits vecchi, %d notifiche vecchie rimosse.",
-                sessioni, challenge_2fa, rate_limits, notifiche,
+                "Pulizia DB: %d sessioni scadute, %d challenge 2FA scadute, %d token recovery 2FA rimossi, %d rate limits vecchi, %d notifiche vecchie rimosse.",
+                sessioni, challenge_2fa, recovery_2fa, rate_limits, notifiche,
             )
     except Exception as exc:
         logger.warning("pulisci_sessioni_scadute: %s", exc)
@@ -1105,6 +1149,118 @@ def verifica_e_consuma_token(email: str, otp: str) -> bool:
                 return cursor.rowcount == 1
     except Exception as exc:
         logger.error("verifica_e_consuma_token: %s", exc)
+        return False
+
+
+def create_totp_recovery_token(
+    email: str,
+    challenge_token: str,
+    provider: str = "password",
+    ttl_minuti: int = 10,
+) -> str | None:
+    """
+    Genera un OTP numerico a 6 cifre per il recovery 2FA, legato alla
+    challenge login corrente.
+    """
+    if not email or not challenge_token:
+        return None
+    email_norm = str(email).strip().lower()
+    provider_norm = str(provider or "password").strip().lower() or "password"
+    challenge_hash = _hash_ephemeral_value(challenge_token)
+    otp = "".join(random.choices(string.digits, k=6))
+    otp_hash = _hash_ephemeral_value(otp)
+
+    try:
+        with connetti_db() as conn:
+            with conn.cursor() as cursor:
+                _ensure_totp_recovery_tokens_table(cursor)
+                cursor.execute(
+                    "UPDATE totp_recovery_tokens SET used = TRUE "
+                    "WHERE email = %s AND used = FALSE AND expires_at > NOW()",
+                    (email_norm,),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO totp_recovery_tokens (email, challenge_token, provider, otp, expires_at)
+                    VALUES (%s, %s, %s, %s, NOW() + (%s * INTERVAL '1 minute'))
+                    """,
+                    (email_norm, challenge_hash, provider_norm, otp_hash, int(ttl_minuti)),
+                )
+        logger.info("Recovery 2FA token creato per %s (scade in %d min).", email_norm, ttl_minuti)
+        return otp
+    except Exception as exc:
+        logger.error("create_totp_recovery_token: %s", exc)
+        return None
+
+
+def consume_totp_recovery_token_and_disable_totp(
+    email: str,
+    challenge_token: str,
+    otp: str,
+    provider: str = "password",
+) -> bool:
+    """
+    Consuma in modo atomico il token recovery 2FA, disabilita il TOTP attuale
+    e invalida le sessioni/challenge pendenti dell'utente.
+    """
+    if not email or not challenge_token or not otp:
+        return False
+    email_norm = str(email).strip().lower()
+    provider_norm = str(provider or "password").strip().lower() or "password"
+    challenge_clean = str(challenge_token).strip()
+    otp_clean = str(otp).strip()
+    challenge_hash = _hash_ephemeral_value(challenge_clean)
+    otp_hash = _hash_ephemeral_value(otp_clean)
+
+    try:
+        with connetti_db() as conn:
+            with conn.cursor() as cursor:
+                _ensure_totp_recovery_tokens_table(cursor)
+                _ensure_user_totp_table(cursor)
+                _ensure_pending_2fa_table(cursor)
+                _ensure_active_sessions_schema(cursor)
+
+                cursor.execute(
+                    """
+                    UPDATE totp_recovery_tokens
+                    SET used = TRUE
+                    WHERE email = %s
+                      AND challenge_token IN (%s, %s)
+                      AND provider = %s
+                      AND otp IN (%s, %s)
+                      AND used = FALSE
+                      AND expires_at > NOW()
+                    """,
+                    (email_norm, challenge_hash, challenge_clean, provider_norm, otp_hash, otp_clean),
+                )
+                if cursor.rowcount != 1:
+                    conn.rollback()
+                    return False
+
+                cursor.execute(
+                    "DELETE FROM user_totp WHERE email = %s AND enabled = TRUE",
+                    (email_norm,),
+                )
+                if cursor.rowcount != 1:
+                    conn.rollback()
+                    return False
+
+                cursor.execute(
+                    "DELETE FROM pending_2fa_challenges WHERE email = %s",
+                    (email_norm,),
+                )
+                cursor.execute(
+                    "DELETE FROM active_sessions WHERE LOWER(TRIM(user_email)) = %s",
+                    (email_norm,),
+                )
+                cursor.execute(
+                    "UPDATE totp_recovery_tokens SET used = TRUE "
+                    "WHERE email = %s AND used = FALSE",
+                    (email_norm,),
+                )
+        return True
+    except Exception as exc:
+        logger.error("consume_totp_recovery_token_and_disable_totp: %s", exc)
         return False
  
  
