@@ -19,12 +19,25 @@ import json
 import logging
 import os
 import re
+import ssl
+import sys
 import time
+from pathlib import Path
 from datetime import datetime
 from functools import lru_cache
 from typing import Any
-import numpy as np
-import pandas as pd
+import tomllib
+
+import certifi
+
+_DATA_STACK_IMPORT_ERROR: Exception | None = None
+try:
+    import numpy as np
+    import pandas as pd
+except Exception as exc:
+    np = None
+    pd = None
+    _DATA_STACK_IMPORT_ERROR = exc
 
 logger = logging.getLogger(__name__)
 
@@ -36,15 +49,105 @@ _GEMINI_MODEL = "models/gemini-2.5-flash" # free tier, più che sufficiente per 
 _MAX_OUTPUT_TOKENS = 1024             # teniamo basso per restare nel free tier
 
 
-@lru_cache(maxsize=1)
-def _get_client():
+def _one_line_exc(exc: Exception) -> str:
+    return " ".join(str(exc).split()) or exc.__class__.__name__
+
+
+def _format_native_dep_error(component: str, exc: Exception) -> str:
+    detail = _one_line_exc(exc)
+    lowered = detail.lower()
+    if (
+        "incompatible architecture" in lowered
+        or "mach-o file" in lowered
+        or "wrong architecture" in lowered
+    ):
+        return (
+            f"{component} non importabile: ambiente Python/venv incoerente "
+            f"(binari compilati per un'architettura diversa). Dettaglio: {detail}"
+        )
+    return f"{component} non importabile: {detail}"
+
+
+def _require_data_stack() -> None:
+    if _DATA_STACK_IMPORT_ERROR is not None:
+        raise RuntimeError(
+            _format_native_dep_error("Stack dati AI (numpy/pandas)", _DATA_STACK_IMPORT_ERROR)
+        ) from _DATA_STACK_IMPORT_ERROR
+
+
+def _load_local_secret_from_toml(name: str) -> str | None:
+    try:
+        secrets_path = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
+        if not secrets_path.exists():
+            return None
+        payload = tomllib.loads(secrets_path.read_text())
+        value = payload.get(name)
+        if value is None:
+            return None
+        value = str(value).strip()
+        return value or None
+    except Exception:
+        return None
+
+
+def _path_debug(value: str | None) -> str:
+    if not value:
+        return "<unset>"
+    path = Path(str(value)).expanduser()
+    return f"{path} (exists={path.exists()})"
+
+
+def _build_gemini_http_options(genai) -> dict[str, Any]:
+    cafile = os.environ.get("SSL_CERT_FILE") or certifi.where()
+    capath = os.environ.get("SSL_CERT_DIR") or None
+    ssl_ctx = ssl.create_default_context(cafile=cafile, capath=capath)
+    return {
+        "client_args": {
+            "trust_env": False,
+            "verify": ssl_ctx,
+        },
+        "async_client_args": {
+            "trust_env": False,
+            "verify": ssl_ctx,
+            "ssl": ssl_ctx,
+        },
+    }
+
+
+def _format_client_init_error(exc: Exception) -> str:
+    detail = _one_line_exc(exc)
+    return (
+        "Inizializzazione client Gemini fallita. "
+        f"Dettaglio: {detail}. "
+        f"python={sys.executable}; arch={os.uname().machine}; "
+        f"cwd={Path.cwd()}; "
+        f"SSL_CERT_FILE={_path_debug(os.environ.get('SSL_CERT_FILE') or certifi.where())}; "
+        f"SSL_CERT_DIR={_path_debug(os.environ.get('SSL_CERT_DIR'))}; "
+        f"GOOGLE_APPLICATION_CREDENTIALS={_path_debug(os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'))}; "
+        f"GOOGLE_GENAI_REPLAYS_DIRECTORY={_path_debug(os.environ.get('GOOGLE_GENAI_REPLAYS_DIRECTORY'))}; "
+        f"GOOGLE_GENAI_CLIENT_MODE={os.environ.get('GOOGLE_GENAI_CLIENT_MODE', '<unset>')}"
+    )
+
+
+def _import_genai():
     try:
         from google import genai
-    except ImportError:
-        raise RuntimeError(
-            "Pacchetto 'google-genai' non installato. "
-            "Eseguire: pip install google-genai"
-        )
+        return genai
+    except ImportError as exc:
+        detail = _one_line_exc(exc)
+        if "no module named" in detail.lower():
+            raise RuntimeError(
+                "Pacchetto 'google-genai' non installato. "
+                "Eseguire: pip install google-genai"
+            ) from exc
+        raise RuntimeError(_format_native_dep_error("SDK Gemini (google-genai)", exc)) from exc
+    except Exception as exc:
+        raise RuntimeError(_format_native_dep_error("SDK Gemini (google-genai)", exc)) from exc
+
+
+@lru_cache(maxsize=1)
+def _get_client():
+    genai = _import_genai()
 
     api_key = os.getenv("GEMINI_API_KEY")
 
@@ -63,17 +166,26 @@ def _get_client():
             pass
 
     if not api_key:
+        api_key = _load_local_secret_from_toml("GEMINI_API_KEY")
+
+    if not api_key:
         raise RuntimeError(
             "GEMINI_API_KEY non configurata. "
             "Aggiungerla in .streamlit/secrets.toml o come variabile d'ambiente."
         )
 
-    return genai.Client(api_key=api_key)
+    try:
+        return genai.Client(
+            api_key=api_key,
+            http_options=_build_gemini_http_options(genai),
+        )
+    except Exception as exc:
+        raise RuntimeError(_format_client_init_error(exc)) from exc
 
 
 def _gemini_error_types():
     try:
-        from google import genai
+        genai = _import_genai()
         return genai.errors.ClientError, genai.errors.ServerError
     except Exception:
         # Se il pacchetto manca, il modulo AI continua a importarsi correttamente
@@ -85,7 +197,7 @@ def _call_gemini(system_prompt, user_prompt, retries=3, delay=2):
     try:
         client = _get_client()
     except Exception as exc:
-        logger.warning("Gemini non disponibile: %s", exc)
+        logger.warning("Gemini non disponibile: %s", exc, exc_info=True)
         return ""
 
     full_prompt = f"{system_prompt}\n\n{user_prompt}"
@@ -158,6 +270,7 @@ def diagnose_gemini() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _normalize_movimenti(df_mov: pd.DataFrame | None) -> pd.DataFrame:
+    _require_data_stack()
     if df_mov is None or df_mov.empty:
         return pd.DataFrame()
 
@@ -181,6 +294,7 @@ def _normalize_movimenti(df_mov: pd.DataFrame | None) -> pd.DataFrame:
 
 
 def _monthly_equivalent_from_ricorrenti(df_ric: pd.DataFrame) -> pd.DataFrame:
+    _require_data_stack()
     if df_ric is None or df_ric.empty:
         return pd.DataFrame()
 
@@ -550,6 +664,7 @@ _MIN_SPESA_CATEGORIA  = 10.0  # soglia minima (€) sotto cui una categoria è i
 
 
 def _profilo_dati(df: pd.DataFrame) -> dict:
+    _require_data_stack()
     """
     Analizza il DataFrame e determina quanti mesi di dati sono disponibili,
     quale fase di apprendimento è attiva e quali segnali possono essere calcolati.
@@ -586,6 +701,7 @@ def _profilo_dati(df: pd.DataFrame) -> dict:
 
 
 def _segnale_baseline(pivot: pd.DataFrame, mese_corrente_periodo) -> list[dict]:
+    _require_data_stack()
     """
     Baseline adattiva: confronta il mese corrente con la media degli ultimi
     N mesi precedenti. La soglia non è fissa al 15% ma si adatta alla
@@ -643,6 +759,7 @@ def _segnale_baseline(pivot: pd.DataFrame, mese_corrente_periodo) -> list[dict]:
 
 
 def _segnale_trend(pivot: pd.DataFrame, mese_corrente_periodo) -> list[dict]:
+    _require_data_stack()
     """
     Regressione lineare sugli ultimi _MESI_TREND mesi per ogni categoria.
     Rileva crescite o cali graduali che la baseline non coglie perché
@@ -700,6 +817,7 @@ def _segnale_yoy(
     mese_corrente: int,
     anno_corrente: int,
 ) -> list[dict]:
+    _require_data_stack()
     """
     Confronto anno su anno (Year-over-Year): stesso mese dell'anno corrente
     vs stesso mese dell'anno precedente.
@@ -895,6 +1013,7 @@ def detect_anomalies(
         return []
 
     try:
+        _require_data_stack()
         # ── Normalizzazione DataFrame ────────────────────────────────────────
         df = df_mov.copy()
         df.columns = [c.lower() for c in df.columns]
