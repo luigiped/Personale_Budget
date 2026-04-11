@@ -694,6 +694,38 @@ div[data-testid="stRadio"] > div[role="radiogroup"]:has(label:nth-child(3)) > la
     color: #f0e8ff; font-size: 0.875rem; line-height: 1.3;
     border-bottom: 1px solid rgba(255,255,255,0.05); vertical-align: middle;
 }
+.reg-html-shell.reg-html-compact .reg-html-bar {
+    padding: 8px 14px;
+}
+.reg-html-shell.reg-html-compact .reg-html-bar-title {
+    font-size: 0.62rem;
+    letter-spacing: 1.05px;
+}
+.reg-html-shell.reg-html-compact .reg-html-table thead th {
+    padding: 8px 12px;
+    font-size: 0.62rem;
+    letter-spacing: 0.85px;
+}
+.reg-html-shell.reg-html-compact .reg-html-table tbody td {
+    padding: 11px 12px;
+    font-size: 0.82rem;
+}
+.reg-html-shell.reg-html-fin-summary .reg-html-table tbody td:first-child {
+    max-width: 110px;
+}
+.reg-html-shell.reg-html-fin-summary .reg-html-scroll {
+    overflow-x: hidden;
+}
+.reg-html-shell.reg-html-fin-summary .reg-html-table {
+    width: 100% !important;
+    min-width: 0 !important;
+    table-layout: fixed !important;
+}
+.reg-html-shell.reg-html-fin-summary .reg-html-table thead th,
+.reg-html-shell.reg-html-fin-summary .reg-html-table tbody td {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
 .reg-html-shell .reg-html-table tbody tr td:nth-child(2) { color: #f0e8ff !important; }
 .reg-html-table tbody tr:last-child td { border-bottom: none; }
 .reg-html-empty {
@@ -984,6 +1016,44 @@ body:has(.login-aurora-bg) div.stButton > button[kind="secondary"]:hover,
 body:has(.login-aurora-bg) div.stButton > button[data-testid="baseButton-secondary"]:hover {
     background: rgba(139,92,246,0.14) !important;
     border-color: rgba(139,92,246,0.50) !important; color: #e0d4ff !important;
+}
+
+body:has(.login-aurora-bg)
+  div[data-testid="stElementContainer"]:has(.pb-google-oauth-anchor) {
+    display: none !important;
+    height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+body:has(.login-aurora-bg)
+  div[data-testid="stElementContainer"]:has(.pb-google-oauth-anchor)
+  + div[data-testid="stElementContainer"] {
+    margin-top: 0.2rem !important;
+    min-height: 58px !important;
+    height: 58px !important;
+    display: block !important;
+    overflow: visible !important;
+}
+body:has(.login-aurora-bg)
+  div[data-testid="stElementContainer"]:has(.pb-google-oauth-anchor)
+  + div[data-testid="stElementContainer"] > div {
+    min-height: 58px !important;
+    height: 58px !important;
+    display: block !important;
+    overflow: visible !important;
+}
+body:has(.login-aurora-bg)
+  div[data-testid="stElementContainer"]:has(.pb-google-oauth-anchor)
+  + div[data-testid="stElementContainer"]
+  iframe.stCustomComponentV1[data-testid="stCustomComponentV1"] {
+    width: 100% !important;
+    min-height: 58px !important;
+    height: 58px !important;
+    border: none !important;
+    border-radius: 12px !important;
+    overflow: hidden !important;
+    background: transparent !important;
+    display: block !important;
 }
 
 /* ─── Divider e alert ────────────────────────────────────────────────────── */
