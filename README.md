@@ -98,7 +98,7 @@ pages/                  → moduli secondari dell'interfaccia
 
 ```bash
 # Clona il repository
-git clone https://github.com/tuo-username/personal-budget-dashboard.git
+git clone https://github.com/luigiped/Personal-Budget
 cd personal-budget-dashboard
 
 # Crea e attiva il virtualenv
