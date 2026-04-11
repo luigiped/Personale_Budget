@@ -10,10 +10,10 @@ import json
 import logging
 import os
 import re
+import threading
 import Database as db
-import ai_engine
 import logiche as log 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from icon.icon import render_glow_icon
 import pandas as pd
 import plotly.express as px
@@ -25,10 +25,16 @@ from config_runtime import (
     export_runtime_env, load_google_oauth_credentials,
     get_secret, auth_access_mode,
 )
- 
-export_runtime_env()
-GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET = load_google_oauth_credentials()
-APP_BASE_URL = default_base_url()
+
+@st.cache_resource
+def _init_config():
+    export_runtime_env()
+    cid, csecret = load_google_oauth_credentials()
+    base_url = default_base_url()
+    return cid, csecret, base_url
+
+
+GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, APP_BASE_URL = _init_config()
  
 try:
     from streamlit_oauth import OAuth2Component, StreamlitOauthError
@@ -54,6 +60,7 @@ from auth_manager import (
     request_password_reset, confirm_password_reset, delete_user_account,
     login_totp_step, setup_totp_begin, setup_totp_confirm,
     cancel_totp_login_challenge,
+    request_totp_recovery, confirm_totp_recovery,
     disable_totp_for_user, disable_totp_for_google_user,
     is_totp_enabled, TwoFactorRequired,
 )
@@ -80,6 +87,31 @@ from utils.html_tables import (
 )
 
 logger = logging.getLogger(__name__)
+
+AI_ALERTS_PAYLOAD_KEY = "ai_alerts_payload_json"
+AI_ALERTS_STATUS_KEY = "ai_alerts_status"
+AI_ALERTS_ERROR_KEY = "ai_alerts_error"
+AI_ALERTS_UPDATED_AT_KEY = "ai_alerts_updated_at"
+AI_ALERTS_LAST_ATTEMPT_AT_KEY = "ai_alerts_last_attempt_at"
+AI_ALERTS_REFRESH_STARTED_AT_KEY = "ai_alerts_refresh_started_at"
+AI_ALERTS_DIRTY_KEY = "ai_alerts_dirty"
+AI_ALERTS_SETTING_KEYS = (
+    AI_ALERTS_PAYLOAD_KEY,
+    AI_ALERTS_STATUS_KEY,
+    AI_ALERTS_ERROR_KEY,
+    AI_ALERTS_UPDATED_AT_KEY,
+    AI_ALERTS_LAST_ATTEMPT_AT_KEY,
+    AI_ALERTS_REFRESH_STARTED_AT_KEY,
+    AI_ALERTS_DIRTY_KEY,
+)
+AI_ALERTS_REFRESH_MAX_AGE = timedelta(minutes=45)
+AI_ALERTS_RETRY_COOLDOWN = timedelta(minutes=5)
+AI_ALERTS_REFRESH_LOCK_TTL = timedelta(minutes=10)
+
+
+@st.cache_resource
+def _get_ai_alert_refresh_registry():
+    return {"lock": threading.Lock(), "threads": {}}
  
 # ---------------------------------------------------------------------------
 # Demo config
@@ -90,6 +122,18 @@ DEMO_USER_EMAIL_NORM = str(DEMO_USER_EMAIL or "").strip().lower() if DEMO_USER_E
  
 AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_OAUTH_ICON = (
+    "data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' "
+    "xmlns:xlink='http://www.w3.org/1999/xlink' viewBox='0 0 48 48'%3E%3Cdefs%3E"
+    "%3Cpath id='a' d='M44.5 20H24v8.5h11.8C34.7 33.9 30.1 37 24 37c-7.2 0-13-5.8-13-13s5.8-13 "
+    "13-13c3.1 0 5.9 1.1 8.1 2.9l6.4-6.4C34.6 4.1 29.6 2 24 2 11.8 2 2 11.8 2 24s9.8 22 22 22"
+    "c11 0 21-8 21-22 0-1.3-.2-2.7-.5-4z'/%3E%3C/defs%3E%3CclipPath id='b'%3E%3Cuse "
+    "xlink:href='%23a' overflow='visible'/%3E%3C/clipPath%3E%3Cpath clip-path='url(%23b)' "
+    "fill='%23FBBC05' d='M0 37V11l17 13z'/%3E%3Cpath clip-path='url(%23b)' fill='%23EA4335' "
+    "d='M0 11l17 13 7-6.1L48 14V0H0z'/%3E%3Cpath clip-path='url(%23b)' fill='%2334A853' "
+    "d='M0 37l30-23 7.9 1L48 0v48H0z'/%3E%3Cpath clip-path='url(%23b)' fill='%234285F4' "
+    "d='M48 48L17 24l-4-3 35-10z'/%3E%3C/svg%3E"
+)
  
 # ---------------------------------------------------------------------------
 # Configurazione pagina (deve essere prima di qualsiasi st.*)
@@ -108,6 +152,8 @@ st.markdown(
     "<style>[data-testid='stSidebarNav']{display:none!important;}</style>",
     unsafe_allow_html=True,
 )
+# Il CSS globale va reiniettato a ogni rerun: il DOM di Streamlit viene ricostruito,
+# mentre session_state sopravvive e non può essere usato per "saltare" questo render.
 st.markdown(f"<style>{CSS_ALL}</style>", unsafe_allow_html=True)
 
 APP_FOOTER_HTML = (
@@ -121,6 +167,36 @@ APP_FOOTER_HTML = (
 
 def _render_app_footer() -> None:
     st.markdown(APP_FOOTER_HTML, unsafe_allow_html=True)
+
+
+def _focus_streamlit_tab(label: str) -> None:
+    """Best effort: riporta il focus su un tab Streamlit specifico dopo un rerun."""
+    target = json.dumps(str(label or "").strip())
+    st.components.v1.html(
+        f"""
+        <script>
+        (function() {{
+          const target = {target};
+          let attempts = 0;
+          function selectTab() {{
+            const doc = window.parent.document;
+            const tabs = Array.from(doc.querySelectorAll('[data-baseweb="tab"]'));
+            const match = tabs.find((tab) => ((tab.innerText || '')).trim() === target);
+            if (match) {{
+              match.click();
+              return;
+            }}
+            attempts += 1;
+            if (attempts < 25) {{
+              window.setTimeout(selectTab, 120);
+            }}
+          }}
+          window.setTimeout(selectTab, 0);
+        }})();
+        </script>
+        """,
+        height=0,
+    )
  
 # ---------------------------------------------------------------------------
 # Helpers cookie/session (layer Streamlit — responsabilità di questo file)
@@ -179,33 +255,46 @@ def _set_cookie(name: str, value: str, expires_at: datetime | None = None) -> No
         except Exception:
             pass
  
-    # Fallback JS
     max_age = ""
     if expires_at:
         from datetime import timezone
 
-        # ... dentro _set_cookie ...
-        if expires_at:
-        # Se expires_at è aware, usiamo datetime.now(timezone.utc)
-            now = datetime.now(timezone.utc) if expires_at.tzinfo else datetime.now()
-            secs = int((expires_at - now).total_seconds())
-            if secs > 0:
-                max_age = f"max-age={secs};"
-        secure = "secure;" if is_https else ""
-        st.components.v1.html(
-            f"<script>document.cookie='{name}={value};{max_age}SameSite=Lax;path=/;{secure}';</script>",
-            height=0,
-        )
+        now = datetime.now(timezone.utc) if expires_at.tzinfo else datetime.now()
+        secs = int((expires_at - now).total_seconds())
+        if secs > 0:
+            max_age = f"max-age={secs};"
+    secure = "secure;" if is_https else ""
+    st.components.v1.html(
+        f"<script>document.cookie='{name}={value};{max_age}SameSite=Lax;path=/;{secure}';</script>",
+        height=0,
+    )
 
 
 def _delete_cookie(name: str) -> None:
-    mgr = _get_cookie_manager()
-    if mgr is None:
-        return
+    is_https = False
     try:
-        mgr.delete(name, key=f"cookie_del_{name}")
+        headers = getattr(st.context, "headers", None) or {}
+        is_https = str(headers.get("x-forwarded-proto", "")).lower() == "https"
     except Exception:
         pass
+
+    mgr = _get_cookie_manager()
+    if mgr is not None:
+        try:
+            mgr.delete(name, key=f"cookie_del_{name}")
+        except Exception:
+            pass
+
+    secure = "secure;" if is_https else ""
+    st.components.v1.html(
+        (
+            f"<script>"
+            f"document.cookie='{name}=;expires=Thu, 01 Jan 1970 00:00:00 GMT;"
+            f"max-age=0;SameSite=Lax;path=/;{secure}';"
+            f"</script>"
+        ),
+        height=0,
+    )
 
 
 _GOOGLE_OAUTH_KEYS = (
@@ -222,13 +311,25 @@ def _clear_query_params() -> None:
         pass
 
 
+def _has_google_oauth_callback_params() -> bool:
+    try:
+        for key in ("code", "state", "error", "error_description"):
+            value = st.query_params.get(key)
+            if isinstance(value, list):
+                value = value[0] if value else None
+            if value:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def _reset_google_oauth_state(*keys: str) -> None:
     for key in keys:
         if not key:
             continue
         st.session_state.pop(f"state-{key}", None)
         st.session_state.pop(f"pkce-{key}", None)
-    st.session_state.pop("oauth_auto_click", None)
 
 
 def _safe_google_authorize_button(
@@ -238,6 +339,7 @@ def _safe_google_authorize_button(
     scope: str,
     redirect_uri: str,
     key: str,
+    icon: str | None = None,
     auto_click: bool = False,
     use_container_width: bool = True,
     extras_params: dict | None = None,
@@ -249,6 +351,7 @@ def _safe_google_authorize_button(
             scope=scope,
             redirect_uri=redirect_uri,
             key=key,
+            icon=icon,
             auto_click=auto_click,
             use_container_width=use_container_width,
             extras_params=extras_params,
@@ -266,7 +369,10 @@ def _clear_pending_totp_state(discard_server_challenge: bool = False) -> None:
     challenge_token = str(st.session_state.get("pending_2fa_challenge", "") or "").strip()
     if discard_server_challenge and challenge_token:
         cancel_totp_login_challenge(challenge_token)
-    for key in ("pending_2fa_email", "pending_2fa_provider", "pending_2fa_challenge", "totp_login_code"):
+    for key in (
+        "pending_2fa_email", "pending_2fa_provider", "pending_2fa_challenge",
+        "totp_login_code", "totp_recovery_step", "totp_recovery_otp",
+    ):
         st.session_state.pop(key, None)
 
 
@@ -317,7 +423,8 @@ def _get_session_user() -> str | None:
             st.session_state.pop(k, None)
         _clear_pending_totp_state(discard_server_challenge=True)
         _reset_google_oauth_state(*_GOOGLE_OAUTH_KEYS)
-        _clear_query_params()
+        if not _has_google_oauth_callback_params():
+            _clear_query_params()
         _delete_cookie(SESSION_TOKEN_COOKIE)
     return email
  
@@ -350,7 +457,7 @@ def _do_logout() -> None:
               "session_auth_provider",
               "_force_onboarding_email",
               "totp_setup_active", "totp_setup_secret", "totp_setup_uri",
-              "totp_confirm_input", "totp_disable_pwd"]:
+              "totp_confirm_input", "totp_disable_pwd", "_totp_recovery_success"]:
         st.session_state.pop(k, None)
     _clear_pending_totp_state(discard_server_challenge=True)
     _reset_google_oauth_state(*_GOOGLE_OAUTH_KEYS)
@@ -417,8 +524,11 @@ def _render_totp_login_step() -> None:
     pending_email = str(st.session_state.get("pending_2fa_email", "") or "").strip().lower()
     pending_provider = str(st.session_state.get("pending_2fa_provider", "password") or "password").strip().lower()
     pending_challenge = str(st.session_state.get("pending_2fa_challenge", "") or "").strip()
+    recovery_step = str(st.session_state.get("totp_recovery_step", "") or "").strip().lower()
     if pending_provider not in {"password", "google"}:
         pending_provider = "password"
+    if recovery_step not in {"request", "confirm"}:
+        recovery_step = ""
 
     if not pending_email or not pending_challenge:
         _clear_pending_totp_state(discard_server_challenge=True)
@@ -437,6 +547,80 @@ def _render_totp_login_step() -> None:
         f"Hai già superato il primo controllo di accesso via {provider_label}. "
         f"Inserisci il codice a 6 cifre dell'app Authenticator per completare l'accesso a **{pending_email}**."
     )
+
+    if recovery_step == "request":
+        st.warning(
+            "Non hai più accesso all'app Authenticator? Possiamo inviarti via email un codice temporaneo "
+            "per disattivare il 2FA attuale e completare l'accesso.",
+            icon="📩",
+        )
+        st.caption(
+            f"Il codice verrà inviato a **{pending_email}** ed è valido per **10 minuti**."
+        )
+        col_send, col_back = st.columns(2)
+        if col_send.button("Invia codice via email", use_container_width=True, type="primary", key="btn_totp_recovery_send"):
+            with st.spinner("Invio codice recovery in corso…"):
+                ok, msg = request_totp_recovery(pending_email, pending_challenge, provider=pending_provider)
+            if ok:
+                st.session_state["totp_recovery_step"] = "confirm"
+                st.rerun()
+            st.error(msg)
+        if col_back.button("← Torna al codice Authenticator", use_container_width=True, key="btn_totp_recovery_back_request"):
+            st.session_state.pop("totp_recovery_step", None)
+            st.session_state.pop("totp_recovery_otp", None)
+            st.rerun()
+        return
+
+    if recovery_step == "confirm":
+        st.warning(
+            "Abbiamo inviato un codice temporaneo via email. Inseriscilo qui per disattivare il 2FA attuale.",
+            icon="📩",
+        )
+        st.caption(
+            f"Controlla la casella di posta di **{pending_email}**. "
+            "Dopo il recovery dovrai configurare di nuovo il 2FA dalle impostazioni."
+        )
+        recovery_code = st.text_input(
+            "Codice recovery via email",
+            max_chars=6,
+            placeholder="123456",
+            key="totp_recovery_otp",
+            label_visibility="collapsed",
+        )
+        col_confirm, col_back, col_resend = st.columns([1.2, 1, 1])
+        if col_confirm.button("Conferma recovery", use_container_width=True, type="primary", key="btn_totp_recovery_confirm"):
+            if not recovery_code or len(recovery_code) != 6 or not recovery_code.isdigit():
+                st.error("Inserisci un codice valido a 6 cifre.")
+            else:
+                try:
+                    email_norm, token, expiry = confirm_totp_recovery(
+                        pending_email,
+                        recovery_code,
+                        pending_challenge,
+                        provider=pending_provider,
+                        user_agent=_current_user_agent(),
+                    )
+                    if not is_onboarding_completed(email_norm):
+                        st.session_state["_force_onboarding_email"] = email_norm
+                    st.session_state["_totp_recovery_success"] = True
+                    _clear_pending_totp_state(discard_server_challenge=False)
+                    _finalize_login(email_norm, token, expiry, provider=pending_provider)
+                    st.rerun()
+                except AuthError as e:
+                    st.error(str(e))
+        if col_back.button("← Indietro", use_container_width=True, key="btn_totp_recovery_back_confirm"):
+            st.session_state["totp_recovery_step"] = "request"
+            st.session_state.pop("totp_recovery_otp", None)
+            st.rerun()
+        if col_resend.button("Rinvia codice", use_container_width=True, key="btn_totp_recovery_resend"):
+            with st.spinner("Nuovo codice recovery in invio…"):
+                ok, msg = request_totp_recovery(pending_email, pending_challenge, provider=pending_provider)
+            if ok:
+                st.success("Nuovo codice inviato. Controlla la posta.")
+            else:
+                st.error(msg)
+        return
+
     totp_code = st.text_input(
         "Codice TOTP",
         max_chars=6,
@@ -466,6 +650,11 @@ def _render_totp_login_step() -> None:
     if col_back.button("← Torna al login", use_container_width=True, key="btn_totp_back"):
         _clear_pending_totp_state(discard_server_challenge=True)
         st.rerun()
+    st.markdown("<div style='text-align:center;margin-top:10px;'>", unsafe_allow_html=True)
+    if st.button("Ho perso lo smartphone", use_container_width=True, key="btn_totp_recovery_start"):
+        st.session_state["totp_recovery_step"] = "request"
+        st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
  
  
 # ---------------------------------------------------------------------------
@@ -474,6 +663,7 @@ def _render_totp_login_step() -> None:
  
 def _render_login_screen() -> None:
     mode = auth_access_mode()
+    pilot_mode = (mode == "pilot_only")
  
     # Sidebar già nascosta via CSS_LOGIN (.login-aurora-bg :has rule)
  
@@ -513,9 +703,14 @@ def _render_login_screen() -> None:
             return
  
         user_flows_disabled = (mode == "demo_only")
-        show_demo_tab = (mode == "demo_only")
+        show_demo_tab = (mode in {"demo_only", "pilot_only"})
+        if pilot_mode:
+            st.info(
+                "Modalità Beta test attiva: la demo resta pubblica, mentre accesso e registrazione reali "
+                "sono riservati agli account autorizzati."
+            )
 
-        # ── COSTRUZIONE TAB: Demo appare solo in modalità demo_only ───────────
+        # ── COSTRUZIONE TAB: Demo appare in modalità demo_only e pilot_only ───
         tab_labels = ["🔑 Accedi", "📝 Registrati"]
         if show_demo_tab:
             tab_labels.append("🚀 Demo")
@@ -579,34 +774,24 @@ def _render_login_screen() -> None:
                 elif not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
                     st.error("Credenziali OAuth mancanti.")
                 else:
-                    login_clicked = st.button(
-                        "Accedi con Google",
-                        key="google_login_custom",
-                        use_container_width=True,
-                        disabled=user_flows_disabled,
-                    )
-                    if user_flows_disabled:
-                        st.caption("Accesso Google disponibile solo in modalità `normal`.")
+                    if mode == "demo_only":
+                        st.caption("Accesso Google disabilitato in modalità `demo_only`.")
                     oauth2 = OAuth2Component(
                         GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
                         AUTHORIZE_URL, TOKEN_URL, TOKEN_URL, ""
                     )
-                    if login_clicked and not user_flows_disabled:
-                        st.session_state["oauth_auto_click"] = True
-                        st.rerun()
-
-                    auto_click   = bool(st.session_state.pop("oauth_auto_click", False))
                     redirect_uri = _redirect_uri()
                     if not redirect_uri:
                         st.error("APP_BASE_URL non configurato.")
                     elif not user_flows_disabled:
+                        st.markdown("<div class='pb-google-oauth-anchor'></div>", unsafe_allow_html=True)
                         result = _safe_google_authorize_button(
                             oauth2,
                             name="Accedi con Google",
                             scope="openid email profile",
                             redirect_uri=redirect_uri,
                             key="google_login_hidden",
-                            auto_click=auto_click,
+                            icon=GOOGLE_OAUTH_ICON,
                             use_container_width=True,
                             extras_params={"prompt": "select_account"},
                         )
@@ -753,6 +938,10 @@ def _render_login_screen() -> None:
         with tab_register:
             if user_flows_disabled:
                 st.info("Registrazione temporaneamente disattivata. Usa la tab Demo.")
+            elif pilot_mode:
+                st.info(
+                    "Registrazione riservata agli indirizzi invitati per questa fase di test."
+                )
             nome_reg  = st.text_input("Nome",              key="reg_nome",  disabled=user_flows_disabled)
             email_reg = st.text_input("Email",             key="reg_email", disabled=user_flows_disabled)
             pwd_reg   = st.text_input("Password",          type="password", key="reg_pwd",  disabled=user_flows_disabled)
@@ -868,6 +1057,12 @@ def _invalidate_runtime_caches(
         _get_struttura_categorie_cached.clear()
     if movimenti or finanziamenti or ricorrenti:
         _get_anomalie_cached.clear()
+        mark_ai_dirty = globals().get("_mark_ai_alerts_dirty_for_current_user")
+        if callable(mark_ai_dirty):
+            try:
+                mark_ai_dirty()
+            except Exception:
+                pass
     if movimenti or finanziamenti or ricorrenti or obiettivi:
         st.session_state.pop("_cal_cache", None)
 
@@ -947,6 +1142,8 @@ def _compute_goal_metrics(
 
 @st.cache_data(ttl=10800, show_spinner=False)
 def _get_anomalie_cached(user_email_param: str) -> list[dict]:
+    import ai_engine
+
     try:
         return ai_engine.detect_anomalies(
             df_mov=_load_movimenti_df(user_email_param),
@@ -959,6 +1156,8 @@ def _get_anomalie_cached(user_email_param: str) -> list[dict]:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _get_ai_health_cached() -> dict:
+    import ai_engine
+
     try:
         return ai_engine.diagnose_gemini()
     except Exception as exc:
@@ -1046,10 +1245,16 @@ def _load_settings_df(user_email_param: str) -> pd.DataFrame:
         return pd.DataFrame(columns=["valore_numerico", "valore_testo"]).set_index(pd.Index([]))
  
  
-def _save_settings_batch(num_payload: dict = None, txt_payload: dict = None) -> tuple[bool, str]:
+def _save_settings_batch_for_user(
+    user_email_param: str,
+    num_payload: dict | None = None,
+    txt_payload: dict | None = None,
+    *,
+    invalidate_cache: bool = True,
+) -> tuple[bool, str]:
     num_payload = num_payload or {}
     txt_payload = txt_payload or {}
-    if not user_email:
+    if not user_email_param:
         return False, "Utente non autenticato."
     try:
         with db.connetti_db() as conn:
@@ -1062,13 +1267,258 @@ def _save_settings_batch(num_payload: dict = None, txt_payload: dict = None) -> 
                     "valore_testo = EXCLUDED.valore_testo"
                 )
                 for key, value in num_payload.items():
-                    cur.execute(upsert_q, (str(key), user_email, float(value) if value is not None else None, None))
+                    cur.execute(upsert_q, (str(key), user_email_param, float(value) if value is not None else None, None))
                 for key, value in txt_payload.items():
-                    cur.execute(upsert_q, (str(key), user_email, None, str(value) if value is not None else ""))
-        _invalidate_runtime_caches(settings=True)
+                    cur.execute(upsert_q, (str(key), user_email_param, None, str(value) if value is not None else ""))
+        if invalidate_cache:
+            _invalidate_runtime_caches(settings=True)
         return True, ""
     except Exception as exc:
         return False, str(exc)
+
+
+def _save_settings_batch(num_payload: dict = None, txt_payload: dict = None) -> tuple[bool, str]:
+    return _save_settings_batch_for_user(user_email, num_payload, txt_payload)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _dt_to_storage(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _parse_storage_dt(value: str | None) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _format_snapshot_ts(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    try:
+        local_value = value.astimezone()
+        return local_value.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return ""
+
+
+def _load_text_settings_for_user(user_email_param: str, keys: tuple[str, ...]) -> dict[str, str]:
+    if not user_email_param or not keys:
+        return {}
+    try:
+        wanted = {str(key) for key in keys}
+        with db.connetti_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT chiave, valore_testo "
+                    "FROM asset_settings "
+                    "WHERE user_email = %s",
+                    (user_email_param,),
+                )
+                rows = cur.fetchall()
+        return {
+            str(row[0]): "" if row[1] is None else str(row[1])
+            for row in rows
+            if str(row[0]) in wanted
+        }
+    except Exception:
+        return {}
+
+
+def _load_ai_alerts_snapshot(user_email_param: str) -> dict:
+    raw = _load_text_settings_for_user(user_email_param, AI_ALERTS_SETTING_KEYS)
+    payload_raw = raw.get(AI_ALERTS_PAYLOAD_KEY, "")
+    payload: list[dict] = []
+    if payload_raw.strip():
+        try:
+            parsed = json.loads(payload_raw)
+            if isinstance(parsed, list):
+                payload = parsed
+        except Exception:
+            payload = []
+    status = str(raw.get(AI_ALERTS_STATUS_KEY, "") or "idle").strip().lower() or "idle"
+    if status not in {"idle", "refreshing", "ready", "error"}:
+        status = "idle"
+    return {
+        "payload": payload,
+        "has_result": AI_ALERTS_PAYLOAD_KEY in raw,
+        "status": status,
+        "error": str(raw.get(AI_ALERTS_ERROR_KEY, "") or "").strip(),
+        "updated_at": _parse_storage_dt(raw.get(AI_ALERTS_UPDATED_AT_KEY)),
+        "last_attempt_at": _parse_storage_dt(raw.get(AI_ALERTS_LAST_ATTEMPT_AT_KEY)),
+        "refresh_started_at": _parse_storage_dt(raw.get(AI_ALERTS_REFRESH_STARTED_AT_KEY)),
+        "dirty": str(raw.get(AI_ALERTS_DIRTY_KEY, "") or "").strip() == "1",
+    }
+
+
+def _save_ai_alerts_state(user_email_param: str, txt_payload: dict[str, str]) -> None:
+    _save_settings_batch_for_user(
+        user_email_param,
+        {},
+        txt_payload,
+        invalidate_cache=False,
+    )
+
+
+def _mark_ai_alerts_dirty_for_user(user_email_param: str) -> None:
+    if not user_email_param:
+        return
+    _save_ai_alerts_state(
+        user_email_param,
+        {
+            AI_ALERTS_DIRTY_KEY: "1",
+        },
+    )
+
+
+def _mark_ai_alerts_dirty_for_current_user() -> None:
+    if user_email:
+        _mark_ai_alerts_dirty_for_user(user_email)
+
+
+def _should_refresh_ai_alerts(snapshot: dict, *, has_source_data: bool) -> bool:
+    now = _utc_now()
+    if not has_source_data:
+        return False
+    if snapshot.get("status") == "refreshing":
+        started_at = snapshot.get("refresh_started_at")
+        if started_at and (now - started_at) < AI_ALERTS_REFRESH_LOCK_TTL:
+            return False
+    if snapshot.get("dirty"):
+        return True
+    if not snapshot.get("has_result"):
+        last_attempt_at = snapshot.get("last_attempt_at")
+        return last_attempt_at is None or (now - last_attempt_at) >= AI_ALERTS_RETRY_COOLDOWN
+    if snapshot.get("status") == "error":
+        last_attempt_at = snapshot.get("last_attempt_at")
+        return last_attempt_at is None or (now - last_attempt_at) >= AI_ALERTS_RETRY_COOLDOWN
+    updated_at = snapshot.get("updated_at")
+    return updated_at is None or (now - updated_at) >= AI_ALERTS_REFRESH_MAX_AGE
+
+
+def _ai_alerts_refresh_worker(user_email_param: str) -> None:
+    registry = _get_ai_alert_refresh_registry()
+    refresh_started_at = _utc_now()
+    try:
+        import ai_engine
+
+        df_mov_worker = db.carica_dati(user_email_param)
+        if df_mov_worker is None or df_mov_worker.empty:
+            current_snapshot = _load_ai_alerts_snapshot(user_email_param)
+            dirty_value = "1" if current_snapshot.get("dirty") else "0"
+            ts = _dt_to_storage(_utc_now())
+            _save_ai_alerts_state(
+                user_email_param,
+                {
+                    AI_ALERTS_PAYLOAD_KEY: "[]",
+                    AI_ALERTS_STATUS_KEY: "ready",
+                    AI_ALERTS_ERROR_KEY: "",
+                    AI_ALERTS_UPDATED_AT_KEY: ts,
+                    AI_ALERTS_LAST_ATTEMPT_AT_KEY: ts,
+                    AI_ALERTS_REFRESH_STARTED_AT_KEY: "",
+                    AI_ALERTS_DIRTY_KEY: dirty_value,
+                },
+            )
+            return
+
+        df_ric_worker = db.carica_spese_ricorrenti(user_email_param)
+        df_fin_worker = db.carica_finanziamenti(user_email_param)
+
+        anomalies = ai_engine.detect_anomalies(
+            df_mov=df_mov_worker,
+            df_ric=df_ric_worker,
+            df_fin=df_fin_worker,
+        )
+
+        if not anomalies:
+            health = ai_engine.diagnose_gemini()
+            if not health.get("configured") or not health.get("reachable"):
+                raise RuntimeError(health.get("message") or "Gemini non disponibile.")
+
+        current_snapshot = _load_ai_alerts_snapshot(user_email_param)
+        dirty_value = "1" if current_snapshot.get("dirty") else "0"
+        ts = _dt_to_storage(_utc_now())
+        _save_ai_alerts_state(
+            user_email_param,
+            {
+                AI_ALERTS_PAYLOAD_KEY: json.dumps(anomalies, ensure_ascii=False),
+                AI_ALERTS_STATUS_KEY: "ready",
+                AI_ALERTS_ERROR_KEY: "",
+                AI_ALERTS_UPDATED_AT_KEY: ts,
+                AI_ALERTS_LAST_ATTEMPT_AT_KEY: ts,
+                AI_ALERTS_REFRESH_STARTED_AT_KEY: "",
+                AI_ALERTS_DIRTY_KEY: dirty_value,
+            },
+        )
+    except Exception as exc:
+        logger.warning("Aggiornamento automatico avvisi AI fallito per %s: %s", user_email_param, exc, exc_info=True)
+        current_snapshot = _load_ai_alerts_snapshot(user_email_param)
+        dirty_value = "1" if current_snapshot.get("dirty") else "0"
+        ts = _dt_to_storage(_utc_now())
+        _save_ai_alerts_state(
+            user_email_param,
+            {
+                AI_ALERTS_STATUS_KEY: "error",
+                AI_ALERTS_ERROR_KEY: str(exc),
+                AI_ALERTS_LAST_ATTEMPT_AT_KEY: ts,
+                AI_ALERTS_REFRESH_STARTED_AT_KEY: "",
+                AI_ALERTS_DIRTY_KEY: dirty_value,
+            },
+        )
+    finally:
+        with registry["lock"]:
+            current = registry["threads"].get(user_email_param)
+            if current is threading.current_thread():
+                registry["threads"].pop(user_email_param, None)
+
+
+def _ensure_ai_alerts_refresh(user_email_param: str, *, has_source_data: bool) -> dict:
+    snapshot = _load_ai_alerts_snapshot(user_email_param)
+    if not _should_refresh_ai_alerts(snapshot, has_source_data=has_source_data):
+        return snapshot
+
+    registry = _get_ai_alert_refresh_registry()
+    with registry["lock"]:
+        current = registry["threads"].get(user_email_param)
+        if current and current.is_alive():
+            return _load_ai_alerts_snapshot(user_email_param)
+        if current and not current.is_alive():
+            registry["threads"].pop(user_email_param, None)
+
+        started_at = _utc_now()
+        _save_ai_alerts_state(
+            user_email_param,
+            {
+                AI_ALERTS_STATUS_KEY: "refreshing",
+                AI_ALERTS_ERROR_KEY: "",
+                AI_ALERTS_LAST_ATTEMPT_AT_KEY: _dt_to_storage(started_at),
+                AI_ALERTS_REFRESH_STARTED_AT_KEY: _dt_to_storage(started_at),
+                AI_ALERTS_DIRTY_KEY: "0",
+            },
+        )
+        worker = threading.Thread(
+            target=_ai_alerts_refresh_worker,
+            args=(user_email_param,),
+            daemon=True,
+            name=f"ai-alerts-refresh:{user_email_param}",
+        )
+        registry["threads"][user_email_param] = worker
+        worker.start()
+    return _load_ai_alerts_snapshot(user_email_param)
  
  
 settings = _load_settings_df(user_email)
@@ -1469,6 +1919,14 @@ def _render_onboarding_wizard() -> None:
 
 if onboarding_required:
     _render_onboarding_wizard()
+
+
+if st.session_state.pop("_totp_recovery_success", False):
+    st.success(
+        "Recovery 2FA completato. Il vecchio Authenticator è stato disattivato: "
+        "configura di nuovo il 2FA dalle Impostazioni.",
+        icon="✅",
+    )
 
 
 if user_email and not is_demo_account and not is_totp_enabled(user_email):
@@ -2142,6 +2600,8 @@ def _genera_spiegazione_previsione_ai(
     uscite_attese: float,
     metodo: str,
 ) -> str:
+    import ai_engine
+
     fallback = _fallback_spiegazione_previsione_ai(
         anno=anno,
         mese_cutoff=mese_cutoff,
@@ -2226,6 +2686,8 @@ if "ai_chat_history" not in st.session_state:
 
 @st.dialog("🤖 Assistente Finanziario", width="large")
 def _show_ai_chat():
+    import ai_engine
+
     st.caption(
         "Fai domande sui tuoi dati finanziari in linguaggio naturale. "
         "Attenzione: i dati vengono inviati a un servizio AI esterno per l'elaborazione, ma non vengono memorizzati. (BETA, funzionalità sperimentale) "
@@ -2355,10 +2817,68 @@ def _show_ai_chat():
 
 _ai_col1, _ai_col2 = st.columns([8, 1])
 with _ai_col2:
-    if st.button("🤖 AI", use_container_width=True, help="Apri l'assistente finanziario AI"):
+    if st.button("🤖 LUAI", use_container_width=True, help="Apri l'assistente finanziario AI"):
         _show_ai_chat()
 
 st.divider()
+
+
+@st.fragment(run_every="10s")
+def _render_ai_alerts_panel(user_email_param: str, *, has_source_data: bool) -> None:
+    snapshot = _ensure_ai_alerts_refresh(user_email_param, has_source_data=has_source_data)
+    anomalies = snapshot.get("payload", []) if snapshot.get("has_result") else []
+    expanded = bool(anomalies) or snapshot.get("status") in {"refreshing", "error"}
+    gravita_cfg = {
+        "info": {"bg": "rgba(59,130,246,0.12)", "border": "rgba(59,130,246,0.40)", "icon": "ℹ️"},
+        "warning": {"bg": "rgba(251,146,60,0.12)", "border": "rgba(251,146,60,0.45)", "icon": "⚠️"},
+        "alert": {"bg": "rgba(239,68,68,0.14)", "border": "rgba(239,68,68,0.50)", "icon": "🚨"},
+    }
+    default_cfg = {"bg": "rgba(59,130,246,0.12)", "border": "rgba(59,130,246,0.40)", "icon": "ℹ️"}
+
+    with st.expander("🤖 Avvisi del tuo assistente AI", expanded=expanded):
+        if snapshot.get("status") == "refreshing":
+            if snapshot.get("has_result"):
+                st.info("Aggiornamento automatico avvisi AI in corso. Continuo a mostrarti l'ultima analisi disponibile.")
+            else:
+                st.info("Prima analisi AI in preparazione. La dashboard resta utilizzabile mentre aggiorno gli avvisi.")
+
+        if anomalies:
+            for item in anomalies:
+                cfg = gravita_cfg.get(item.get("gravita", "info"), default_cfg)
+                titolo = item.get("titolo", item.get("categoria", ""))
+                message = item.get("messaggio", item.get("testo", ""))
+                st.markdown(
+                    f"""<div style="
+                        background:{cfg['bg']};
+                        border:1px solid {cfg['border']};
+                        border-radius:10px;padding:10px 14px;margin-bottom:8px;
+                        font-family:'Plus Jakarta Sans',sans-serif;font-size:0.88rem;
+                        color:rgba(220,230,255,0.90);">
+                        {cfg['icon']} <b>{titolo}</b> — {message}
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+        elif snapshot.get("has_result") and snapshot.get("status") == "ready":
+            st.success("Nessuna anomalia rilevata sui dati attuali.")
+        elif snapshot.get("status") == "error":
+            st.warning(snapshot.get("error") or "Aggiornamento AI non disponibile al momento.")
+        elif not has_source_data:
+            st.info("Aggiungi qualche movimento per attivare gli avvisi automatici dell'assistente AI.")
+        else:
+            st.info("L'assistente AI non ha ancora prodotto una prima analisi.")
+
+        updated_label = _format_snapshot_ts(snapshot.get("updated_at"))
+        if updated_label:
+            st.caption(f"Ultimo aggiornamento avvisi AI: {updated_label}")
+        elif snapshot.get("status") == "refreshing":
+            started_label = _format_snapshot_ts(snapshot.get("refresh_started_at"))
+            if started_label:
+                st.caption(f"Aggiornamento avviato alle {started_label}")
+
+        if snapshot.get("status") == "error" and anomalies:
+            error_text = str(snapshot.get("error") or "").strip()
+            if error_text:
+                st.caption(f"Ultimo tentativo di refresh non riuscito: {error_text}")
 
 
 # ---------------------------------------------------------------------------
@@ -2368,44 +2888,16 @@ st.divider()
 tab_home, tab_charts, tab_assets, tab_debts, tab_admin, tab_settings = st.tabs([
     "🏠 HOME", "📈 ANALISI", "💰 PATRIMONIO", "🔗 DEBITI", "📝 TRANSAZIONI", "⚙️ IMPOSTAZIONI"
 ])
+
+if st.session_state.get("totp_setup_active"):
+    _focus_streamlit_tab("⚙️ IMPOSTAZIONI")
  
 # ============================================================
 # TAB 1 — HOME
 # ============================================================
 with tab_home:
     st.markdown("<div class='section-title'>HOME</div>", unsafe_allow_html=True)
-    _anomalie = _get_anomalie_cached(user_email)
-    _ai_health = _get_ai_health_cached()
-    _gravita_cfg = {
-        "info": {"bg": "rgba(59,130,246,0.12)", "border": "rgba(59,130,246,0.40)", "icon": "ℹ️"},
-        "warning": {"bg": "rgba(251,146,60,0.12)", "border": "rgba(251,146,60,0.45)", "icon": "⚠️"},
-        "alert": {"bg": "rgba(239,68,68,0.14)", "border": "rgba(239,68,68,0.50)", "icon": "🚨"},
-    }
-    _default_cfg = {"bg": "rgba(59,130,246,0.12)", "border": "rgba(59,130,246,0.40)", "icon": "ℹ️"}
-    with st.expander("🤖 Avvisi del tuo assistente AI", expanded=bool(_anomalie)):
-        if _anomalie:
-            for _a in _anomalie:
-                _cfg = _gravita_cfg.get(_a.get("gravita", "info"), _default_cfg)
-                _titolo = _a.get("titolo", _a.get("categoria", ""))
-                _msg = _a.get("messaggio", _a.get("testo", ""))
-                st.markdown(
-                    f"""<div style="
-                        background:{_cfg['bg']};
-                        border:1px solid {_cfg['border']};
-                        border-radius:10px;padding:10px 14px;margin-bottom:8px;
-                        font-family:'Plus Jakarta Sans',sans-serif;font-size:0.88rem;
-                        color:rgba(220,230,255,0.90);">
-                        {_cfg['icon']} <b>{_titolo}</b> — {_msg}
-                    </div>""",
-                    unsafe_allow_html=True,
-                )
-        elif _ai_health.get("reachable"):
-            st.success("Nessuna anomalia rilevata sui dati attuali.")
-        else:
-            st.warning(_ai_health.get("message", "Gemini non disponibile."))
-        _sample = str(_ai_health.get("sample_response") or "").strip()
-        if _sample:
-            st.caption(f"Diagnostica Gemini: risposta test = `{_sample}`")
+    _render_ai_alerts_panel(user_email, has_source_data=not df_mov.empty)
 
     try:
         _df_ob_home = _load_obiettivi_df(user_email, solo_attivi=True).copy()
@@ -2839,7 +3331,7 @@ with tab_charts:
             _ai_key = f"_forecast_ai_expl_{anno_sel}_{_mese_cutoff}"
             _ai_btn_col, _ai_txt_col = st.columns([1.2, 4.8], gap="small")
             with _ai_btn_col:
-                if st.button("Spiega con AI", key=f"btn{_ai_key}", use_container_width=True):
+                if st.button("Spiega con LUAI", key=f"btn{_ai_key}", use_container_width=True):
                     with st.spinner("Sto leggendo la previsione..."):
                         st.session_state[_ai_key] = _genera_spiegazione_previsione_ai(
                             anno=int(anno_sel),
@@ -3736,7 +4228,12 @@ with tab_debts:
                     perc_color = Colors.GREEN if perc >= 50 else Colors.AMBER if perc >= 25 else Colors.RED
                     mesi_color = Colors.RED   if mesi_r > 120 else Colors.AMBER if mesi_r > 36 else Colors.GREEN
                     debt_rows.append(_tr([
-                        _td(f"<strong>{escape(str(row['Nome']))}</strong>", color=Colors.TEXT, weight=600),
+                        _td(
+                            f"<strong>{escape(str(row['Nome']))}</strong>",
+                            color=Colors.TEXT,
+                            weight=600,
+                            title=str(row["Nome"]),
+                        ),
                         _td(f"<span style='white-space:nowrap'>{eur2(row['Rata'])}</span>",    color=Colors.RED,  mono=True, weight=600),
                         _td(f"<span style='white-space:nowrap'>{eur2(row['Residuo'])}</span>", color=Colors.TEXT, mono=True),
                         _td(f"<span style='white-space:nowrap'>{perc:.1f}%</span>",            color=perc_color,  mono=True, align="center"),
@@ -3744,15 +4241,15 @@ with tab_debts:
                     ]))
                 st.markdown(scroll_table(
                     title="Riepilogo finanziamenti", right_html="",
-                    columns=[("Nome","left"),("Rata","right"),("Residuo","right"),("% Compl.","center"),("Mesi","center")],
-                    widths=[2.0, 1.5, 1.8, 1.0, 0.7],
+                    columns=[("Nome","center"),("Rata","center"),("Resid.","center"),("%","center"),("Mesi","center")],
+                    widths=[0.8, 0.8, 0.90, 0.60, 0.60],
                     rows_html=debt_rows, height_px=300,
+                    min_table_width_px=0,
+                    shell_class="reg-html-compact reg-html-fin-summary",
                 ), unsafe_allow_html=True)
             else:
                 st.info("Nessun dettaglio rate disponibile.")
 
- 
- 
 # ============================================================
 # TAB 5 — TRANSAZIONI
 # ============================================================
@@ -3856,7 +4353,7 @@ with tab_admin:
                 title="Elenco ricorrenti",
                 right_html=f"{format_eur(tot_mensile, 2)} / mese",
                 columns=[("#","left"),("Descrizione","left"),("Importo","left"),("Frequenza","left"),("Scad.","center"),("Inizio","center"),("Fine","center")],
-                widths=[0.45, 2.6, 1.1, 1.25, 0.7, 1.1, 0.9],
+                widths=[0.45, 2.6, 1.1, 1.25, 0.7, 1.1, 1.8],
                 rows_html=ric_rows_html, height_px=320,
             ), unsafe_allow_html=True)
  
@@ -3963,8 +4460,8 @@ with tab_admin:
  
             st.markdown(scroll_table(
                 title="Finanziamenti in corso", right_html=right_fin,
-                columns=[("Nome","left"),("Capitale","left"),("TAEG","left"),("Durata","center"),("Inizio","center"),("Rata","left"),("Rate pag.","center")],
-                widths=[1.8, 1.2, 0.9, 0.8, 1.1, 1.1, 0.9],
+                columns=[("Nome","center"),("Capitale","center"),("TAEG","center"),("Durata","center"),("Inizio","center"),("Rata","center"),("Rate pag.","center")],
+                widths=[2.0, 1.2, 0.9, 0.8, 1.1, 1.5, 1.5],
                 rows_html=fin_rows_html, height_px=280,
             ), unsafe_allow_html=True)
  
@@ -4419,6 +4916,7 @@ with tab_settings:
                 st.caption("Sugli account Google il codice TOTP verrà richiesto dopo il login OAuth, come secondo passaggio.")
             if st.button("⚙️ Configura autenticazione a due fattori", type="primary", key="btn_totp_setup_start"):
                 st.session_state["totp_setup_active"] = True
+                st.rerun()
 
             if st.session_state.get("totp_setup_active"):
                 if "totp_setup_secret" not in st.session_state:
