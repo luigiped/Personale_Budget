@@ -1,2 +1,6 @@
 [client]
 showSidebarNavigation = false
+
+[server]
+fileWatcherType = "watchdog"
+folderWatchBlacklist = [".venv", ".git", "__pycache__", ".pytest_cache", ".mypy_cache"]
