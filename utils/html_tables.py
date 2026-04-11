@@ -65,6 +65,7 @@ def scroll_table(
     rows_html: list[str],
     height_px: int = 320,
     min_table_width_px: int | None = None,
+    shell_class: str = "",
     empty_message: str = "Nessun dato disponibile.",
 ) -> str:
     """
@@ -79,8 +80,9 @@ def scroll_table(
     if min_table_width_px is None:
         min_table_width_px = max(680, int(sum(widths) * 110))
     headers = "".join(_th(label, align) for label, align in columns)
+    shell_classes = " ".join(part for part in ("reg-html-shell", shell_class.strip()) if part)
     return f"""
-<div class="reg-html-shell">
+<div class="{shell_classes}">
   <div class="reg-html-bar">
     <span class="reg-html-bar-title">{escape(str(title))}</span>
     <span class="reg-html-bar-value">{right_html}</span>
