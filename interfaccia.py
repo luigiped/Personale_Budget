@@ -1,5 +1,5 @@
-##########################################################
-##### Personal Budget Dashboard - Interfaccia utente #####
+###########################################################
+##### Personal Budget Dashboard - Interfaccia utente ######
 
 # streamlit run interfaccia.py
 
