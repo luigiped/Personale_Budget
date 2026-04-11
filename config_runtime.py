@@ -19,6 +19,14 @@ def _normalize(value):
     return value or None
 
 
+def _normalize_email(value):
+    value = _normalize(value)
+    if not value:
+        return None
+    value = str(value).strip().lower()
+    return value if "@" in value else None
+
+
 def _read_env(name):
     return _normalize(os.getenv(name))
 
@@ -58,7 +66,7 @@ APP_ENV = _resolve_app_env()
 _auth_mode_raw = _read_env("AUTH_ACCESS_MODE") or _read_streamlit_secret("AUTH_ACCESS_MODE") or "normal"
 IS_DEMO = str(_auth_mode_raw).strip().lower() != "normal"
 
-AUTH_MODE_ALLOWED = {"normal", "demo_only", "closed"}
+AUTH_MODE_ALLOWED = {"normal", "demo_only", "closed", "pilot_only"}
 
 
 # blocco Secret Manager lo lasciamo ma non verrà mai chiamato su Streamlit
@@ -172,11 +180,55 @@ def default_base_url():
     return local_url.rstrip("/")
 
 
+@lru_cache(maxsize=1)
+def _read_email_allowlist(secret_name):
+    raw = get_secret(secret_name)
+    if raw is None:
+        return tuple()
+
+    if isinstance(raw, (list, tuple, set)):
+        candidates = list(raw)
+    else:
+        text = str(raw).strip()
+        if not text:
+            return tuple()
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+                candidates = list(parsed) if isinstance(parsed, list) else [text]
+            except Exception:
+                candidates = [text]
+        else:
+            normalized = text.replace("\n", ",").replace(";", ",")
+            candidates = normalized.split(",")
+
+    result = []
+    seen = set()
+    for candidate in candidates:
+        email = _normalize_email(candidate)
+        if not email or email in seen:
+            continue
+        seen.add(email)
+        result.append(email)
+    return tuple(result)
+
+
+def allowed_login_emails():
+    """Email abilitate al login reale in modalità `pilot_only`."""
+    return _read_email_allowlist("ALLOWED_LOGIN_EMAILS")
+
+
+def allowed_registration_emails():
+    """Email abilitate alla registrazione reale in modalità `pilot_only`."""
+    return _read_email_allowlist("ALLOWED_REGISTRATION_EMAILS")
+
+
 def auth_access_mode():
     """
     Modalità accesso applicazione:
     - normal: login/registrazione abilitati
     - demo_only: solo account demo
+    - pilot_only: demo pubblica + accesso reale solo per email autorizzate
     - closed: accessi disabilitati
     """
     raw = get_secret("AUTH_ACCESS_MODE")
