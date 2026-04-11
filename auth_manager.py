@@ -9,7 +9,7 @@ Gestisce esclusivamente:
   - Creazione / verifica / cancellazione sessioni nel DB
   - Login email+password (con migrazione automatica SHA-256 → bcrypt) e recupero password
   - Registrazione utenti
-  - Modalità accesso (normal / demo_only / closed)
+  - Modalità accesso (normal / demo_only / pilot_only / closed)
 
 La gestione di cookie e session state lato client è delegata al layer UI
 (interfaccia Streamlit o NiceGUI), che chiama le funzioni di questo modulo
@@ -29,6 +29,8 @@ Funzioni pubbliche principali:
     disable_totp_for_user(email, password) → (bool, msg)
     disable_totp_for_google_user(email)    → (bool, msg)
     is_totp_enabled(email)          → bool
+    request_totp_recovery(email, challenge, provider) → (bool, msg)
+    confirm_totp_recovery(email, otp, challenge, provider) → (email, token, expiry)
     TwoFactorRequired               → eccezione per secondo step TOTP
 """
 
@@ -37,7 +39,10 @@ import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
 import Database as db
-from config_runtime import auth_access_mode, get_secret
+from config_runtime import (
+    auth_access_mode, get_secret,
+    allowed_login_emails, allowed_registration_emails,
+)
 from security import (
     hash_password, needs_rehash, verify_password,
     generate_totp_secret, get_totp_uri, verify_totp_code,
@@ -59,6 +64,11 @@ RESET_REQUEST_WINDOW_MINUTES = 15
 RESET_REQUEST_MAX_ATTEMPTS = 3
 RESET_CONFIRM_WINDOW_MINUTES = 15
 RESET_CONFIRM_MAX_ATTEMPTS = 6
+TOTP_RECOVERY_TTL_MINUTES = 10
+TOTP_RECOVERY_REQUEST_WINDOW_MINUTES = 15
+TOTP_RECOVERY_REQUEST_MAX_ATTEMPTS = 3
+TOTP_RECOVERY_CONFIRM_WINDOW_MINUTES = 15
+TOTP_RECOVERY_CONFIRM_MAX_ATTEMPTS = 6
 # Intervallo minimo tra due verifiche DB della stessa sessione (cache locale).
 # Il layer UI può implementare una cache in memoria usando questo valore.
 SESSION_RECHECK_SECONDS = 20
@@ -107,6 +117,27 @@ def _current_auth_mode() -> str:
 
 def _demo_email_norm() -> str | None:
     return _normalize_email(get_secret("DEMO_USER_EMAIL"))
+
+
+def _pilot_login_allowlist() -> set[str]:
+    emails = {_normalize_email(email) for email in allowed_login_emails()}
+    emails.update(_normalize_email(email) for email in allowed_registration_emails())
+    return {email for email in emails if email}
+
+
+def _pilot_registration_allowlist() -> set[str]:
+    return {email for email in (_normalize_email(item) for item in allowed_registration_emails()) if email}
+
+
+def _is_pilot_login_allowed(email_norm: str) -> bool:
+    demo_email = _demo_email_norm()
+    if demo_email and email_norm == demo_email:
+        return True
+    return email_norm in _pilot_login_allowlist()
+
+
+def _is_pilot_registration_allowed(email_norm: str) -> bool:
+    return email_norm in _pilot_registration_allowlist()
 
 
 def _parse_datetime_utc(value) -> datetime | None:
@@ -163,6 +194,10 @@ def _check_access_mode(email_norm: str) -> None:
         demo_email = _demo_email_norm()
         if not demo_email or email_norm != demo_email:
             raise AccessDeniedError("Modalità demo attiva: solo l'account demo può accedere.")
+    if mode == "pilot_only" and not _is_pilot_login_allowed(email_norm):
+        raise AccessDeniedError(
+            "Accesso reale riservato agli account autorizzati per questa fase di test."
+        )
 
 
 def _ensure_auth_tables(conn) -> None:
@@ -483,8 +518,14 @@ def register_user(email: str, password: str, nome: str = "") -> None:
         raise AuthError("Email non valida.")
 
     mode = _current_auth_mode()
-    if mode in {"demo_only", "closed"}:
+    if mode == "closed":
         raise AccessDeniedError("Registrazione temporaneamente disabilitata.")
+    if mode == "demo_only":
+        raise AccessDeniedError("Registrazione temporaneamente disabilitata.")
+    if mode == "pilot_only" and not _is_pilot_registration_allowed(email_norm):
+        raise AccessDeniedError(
+            "Registrazione riservata agli account invitati per questa fase di test."
+        )
 
     if not password or len(password) < MIN_PASSWORD_LEN:
         raise AuthError(f"Password troppo corta (minimo {MIN_PASSWORD_LEN} caratteri).")
@@ -841,6 +882,185 @@ def is_totp_enabled(email: str) -> bool:
         return False
     record = db.get_totp_record(email_norm)
     return bool(record and record["enabled"])
+
+
+# ---------------------------------------------------------------------------
+# Recovery 2FA via email
+# ---------------------------------------------------------------------------
+
+def _provider_label(provider: str | None) -> str:
+    return "Google" if str(provider or "").strip().lower() == "google" else "password"
+
+
+def _email_totp_recovery_body(otp: str, ttl_minuti: int = 10, provider: str = "password") -> str:
+    """Corpo HTML dell'email con il codice di recovery 2FA."""
+    provider_label = _provider_label(provider)
+    return (
+        "<div style='font-family: sans-serif; color: #333; max-width: 480px;'>"
+        "<h2 style='color:#f59e0b;'>📲 Recovery verifica in due passaggi</h2>"
+        f"<p>Hai completato il primo accesso via <strong>{provider_label}</strong> "
+        "e richiesto il reset del codice Authenticator.</p>"
+        "<p>Usa il codice qui sotto nell'app entro "
+        f"<strong>{ttl_minuti} minuti</strong> per disattivare il 2FA attuale:</p>"
+        "<div style='font-size:2.2rem;font-weight:700;letter-spacing:0.3rem;"
+        "color:#1a1a2e;background:#fff7e8;border-radius:10px;"
+        f"padding:18px 28px;display:inline-block;margin:16px 0;'>{otp}</div>"
+        "<p style='color:#888;font-size:0.85rem;'>"
+        "Se non sei stato tu a richiedere questo recupero, non inserire il codice "
+        "e cambia subito le credenziali del tuo account.</p>"
+        "<hr style='border:0;border-top:1px solid #eee;margin:20px 0;'>"
+        "<small style='color:#aaa;'>Personal Budget — assistente automatico 🤖</small>"
+        "</div>"
+    )
+
+
+def _email_totp_recovery_confirmed_body(email: str) -> str:
+    """Corpo HTML dell'email di conferma del recovery 2FA."""
+    return (
+        "<div style='font-family: sans-serif; color: #333; max-width: 480px;'>"
+        "<h2 style='color:#10d98a;'>✅ Recovery 2FA completato</h2>"
+        f"<p>La verifica in due passaggi per l'account <strong>{email}</strong> "
+        "è stata disattivata con successo.</p>"
+        "<p>Accedi all'app e configura nuovamente il tuo Authenticator dalle impostazioni "
+        "per ripristinare la protezione a due fattori.</p>"
+        "<p style='color:#e05c5c;font-size:0.88rem;'>"
+        "⚠️ Se non hai richiesto tu questo recupero, cambia subito password e contatta il supporto.</p>"
+        "<hr style='border:0;border-top:1px solid #eee;margin:20px 0;'>"
+        "<small style='color:#aaa;'>Personal Budget — assistente automatico 🤖</small>"
+        "</div>"
+    )
+
+
+def request_totp_recovery(
+    email: str,
+    challenge_token: str,
+    provider: str = "password",
+) -> tuple[bool, str]:
+    """
+    Avvia il recovery del 2FA solo dopo che il primo fattore di accesso
+    è già stato superato e la challenge TOTP è ancora valida.
+    """
+    email_norm = _normalize_email(email)
+    challenge_clean = str(challenge_token or "").strip()
+    provider_norm = str(provider or "password").strip().lower() or "password"
+    if provider_norm not in {"password", "google"}:
+        provider_norm = "password"
+
+    if not email_norm or not challenge_clean:
+        return False, "Sessione di verifica non valida. Ripeti l'accesso."
+    if email_norm == _demo_email_norm():
+        return False, "Il recovery 2FA non è disponibile per l'account demo."
+    if db.is_auth_rate_limited(
+        "totp_recovery_request",
+        email_norm,
+        TOTP_RECOVERY_REQUEST_MAX_ATTEMPTS,
+        TOTP_RECOVERY_REQUEST_WINDOW_MINUTES,
+    ):
+        return False, "Troppi invii richiesti. Attendi qualche minuto e riprova."
+
+    challenge = db.get_pending_2fa_challenge(challenge_clean)
+    if not challenge or challenge["email"] != email_norm or challenge["provider"] != provider_norm:
+        return False, "Verifica 2FA scaduta o non valida. Ripeti l'accesso."
+
+    totp_record = db.get_totp_record(email_norm)
+    if not totp_record or not totp_record["enabled"]:
+        return False, "2FA non configurato per questo account."
+
+    if not db.create_pending_2fa_challenge(
+        email_norm,
+        challenge_clean,
+        provider=provider_norm,
+        ttl_minutes=TOTP_RECOVERY_TTL_MINUTES,
+    ):
+        return False, "Errore temporaneo durante il recovery 2FA. Riprova."
+
+    otp = db.create_totp_recovery_token(
+        email_norm,
+        challenge_clean,
+        provider=provider_norm,
+        ttl_minuti=TOTP_RECOVERY_TTL_MINUTES,
+    )
+    if not otp:
+        logger.error("Impossibile creare token recovery 2FA per %s", email_norm)
+        return False, "Errore interno. Riprova tra qualche minuto."
+
+    ok, msg = send_email(
+        email_norm,
+        "📲 Codice recovery 2FA — Personal Budget",
+        _email_totp_recovery_body(otp, ttl_minuti=TOTP_RECOVERY_TTL_MINUTES, provider=provider_norm),
+    )
+    if not ok:
+        db.register_auth_failure("totp_recovery_request", email_norm, TOTP_RECOVERY_REQUEST_WINDOW_MINUTES)
+        logger.error("Invio recovery 2FA fallito per %s: %s", email_norm, msg)
+        return False, f"Errore nell'invio dell'email: {msg}"
+
+    db.register_auth_failure("totp_recovery_request", email_norm, TOTP_RECOVERY_REQUEST_WINDOW_MINUTES)
+    logger.info("OTP recovery 2FA inviato a %s.", email_norm)
+    return True, "Ti abbiamo inviato un codice via email per recuperare l'accesso."
+
+
+def confirm_totp_recovery(
+    email: str,
+    otp: str,
+    challenge_token: str,
+    provider: str = "password",
+    user_agent: str | None = None,
+) -> tuple[str, str, datetime]:
+    """
+    Conferma il recovery 2FA: valida il codice email, disabilita il TOTP
+    attuale e completa il login con una nuova sessione.
+    """
+    email_norm = _normalize_email(email)
+    challenge_clean = str(challenge_token or "").strip()
+    otp_clean = str(otp or "").strip()
+    provider_norm = str(provider or "password").strip().lower() or "password"
+    if provider_norm not in {"password", "google"}:
+        provider_norm = "password"
+
+    if not email_norm or not challenge_clean or not otp_clean:
+        raise AuthError("Tutti i campi recovery sono obbligatori.")
+    if db.is_auth_rate_limited(
+        "totp_recovery_confirm",
+        email_norm,
+        TOTP_RECOVERY_CONFIRM_MAX_ATTEMPTS,
+        TOTP_RECOVERY_CONFIRM_WINDOW_MINUTES,
+    ):
+        raise AuthError("Troppi tentativi di recovery 2FA. Attendi qualche minuto e richiedi un nuovo codice.")
+
+    challenge = db.get_pending_2fa_challenge(challenge_clean)
+    if not challenge or challenge["email"] != email_norm or challenge["provider"] != provider_norm:
+        raise AuthError("Verifica 2FA scaduta o non valida. Ripeti l'accesso.")
+
+    totp_record = db.get_totp_record(email_norm)
+    if not totp_record or not totp_record["enabled"]:
+        raise AuthError("2FA non configurato per questo account.")
+
+    recovered = db.consume_totp_recovery_token_and_disable_totp(
+        email_norm,
+        challenge_clean,
+        otp_clean,
+        provider=provider_norm,
+    )
+    if not recovered:
+        db.register_auth_failure("totp_recovery_confirm", email_norm, TOTP_RECOVERY_CONFIRM_WINDOW_MINUTES)
+        raise AuthError("Codice recovery non valido o scaduto. Richiedi un nuovo codice.")
+
+    db.clear_auth_rate_limit("totp_recovery_confirm", email_norm)
+    db.clear_auth_rate_limit("totp_recovery_request", email_norm)
+    db.clear_auth_rate_limit("login_totp", email_norm)
+
+    token, expiry = create_session(email_norm, user_agent=user_agent)
+    try:
+        send_email(
+            email_norm,
+            "✅ Recovery 2FA completato — Personal Budget",
+            _email_totp_recovery_confirmed_body(email_norm),
+        )
+    except Exception as exc:
+        logger.warning("Email conferma recovery 2FA non inviata a %s: %s", email_norm, exc)
+
+    logger.info("Recovery 2FA completato con successo per %s.", email_norm)
+    return email_norm, token, expiry
 
 
 # ---------------------------------------------------------------------------
