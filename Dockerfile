@@ -1,24 +1,39 @@
-
 FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PORT=8080 \
     APP_MODE=app
 
-# Imposta la cartella di lavoro nel container
 WORKDIR /app
 
-# Copia il file dei requisiti e installa le librerie
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt ./
+RUN python -m pip install --no-cache-dir -r requirements.txt \
+    && rm -f requirements.txt
 
-# Copia tutto il resto del codice (rispettando .dockerignore)
-COPY . .
-RUN chmod +x /app/entrypoint.sh
+# Una sola immagine runtime: l'entrypoint sceglie tra app Streamlit e job HTTP
+# in base a APP_MODE, senza duplicare servizi o trascinare file locali inutili.
+COPY entrypoint.sh ./
+COPY interfaccia.py ./
+COPY job_service.py ./
+COPY Database.py ./
+COPY logiche.py ./
+COPY auth_manager.py ./
+COPY security.py ./
+COPY config_runtime.py ./
+COPY gmail_sender.py ./
+COPY notification_worker.py ./
+COPY backup.py ./
+COPY ai_engine.py ./
+COPY pages ./pages
+COPY utils ./utils
+COPY icon ./icon
+COPY .streamlit ./.streamlit
 
-# Cloud Run espone la porta del container tramite la env var PORT
+RUN chmod 755 /app/entrypoint.sh
+
 EXPOSE 8080
 
-# Entry point unico: app Streamlit o job_service in base a APP_MODE
 ENTRYPOINT ["/app/entrypoint.sh"]
