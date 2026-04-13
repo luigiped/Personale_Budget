@@ -294,7 +294,7 @@ def run(today=None, tz_name="Europe/Rome", dry_run=False):
   today = today or datetime.now(timezone).date()
 
   auth_mode = os.getenv("AUTH_ACCESS_MODE", "normal").strip().lower()
-  if auth_mode != "normal":
+  if auth_mode not in ("normal", "pilot_only"):
       logger.info("AUTH_ACCESS_MODE=%s — invio notifiche saltato.", auth_mode)
       return {"weekly": 0, "day_before": 0, "total": 0}
 

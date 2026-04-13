@@ -143,7 +143,7 @@ def run():
     from gmail_sender import send_email, send_email_with_attachment
     
     auth_mode = os.getenv("AUTH_ACCESS_MODE", "normal").strip().lower()
-    if auth_mode != "normal":
+    if auth_mode not in ("normal", "pilot_only"):
         logger.info("AUTH_ACCESS_MODE=%s — invio email backup saltato.", auth_mode)
         return True
 
